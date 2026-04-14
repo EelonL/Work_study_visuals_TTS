@@ -24,9 +24,12 @@ Vaatimukset (requirements.txt):
 """
 
 import math
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
+from io import BytesIO
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
@@ -750,6 +753,55 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
 
 # ── Käyttöliittymät ────────────────────────────────────────────────────────
 
+
+def sanitize_filename(name: str) -> str:
+    """Muuttaa tekstin turvalliseksi tiedostonimeksi."""
+    cleaned = re.sub(r'[^A-Za-z0-9ÅÄÖåäö._-]+', '_', name.strip())
+    return cleaned.strip('._') or "henkilo"
+
+
+def figure_to_png_bytes(fig) -> bytes:
+    """Tallentaa matplotlib-kuvaajan PNG-muotoon tavubufferiin."""
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=220, bbox_inches="tight", facecolor=fig.get_facecolor())
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Tilastot") -> bytes:
+    """Tallentaa DataFramen Excel-muotoon tavubufferiin."""
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        ws = writer.sheets[sheet_name]
+        for idx, col in enumerate(df.columns, start=1):
+            max_len = max(
+                [len(str(col))] + [len(str(v)) for v in df[col].fillna("").tolist()]
+            )
+            ws.column_dimensions[openpyxl.utils.get_column_letter(idx)].width = min(max_len + 2, 40)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_person_zip(person_name: str, fig1, fig3, fig2, stats_df: pd.DataFrame) -> bytes:
+    """Rakentaa ZIP-paketin, jossa ovat kaikki henkilön kuvaajat ja taulukko."""
+    safe_name = sanitize_filename(person_name)
+    buffer = BytesIO()
+
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as zf:
+        zf.writestr(f"{safe_name}_kuvaaja1_aikajanakaavio.png", figure_to_png_bytes(fig1))
+        zf.writestr(f"{safe_name}_kuvaaja1b_tyonerakaavio.png", figure_to_png_bytes(fig3))
+        zf.writestr(f"{safe_name}_kuvaaja2_yhteenveto.png", figure_to_png_bytes(fig2))
+
+        if not stats_df.empty:
+            zf.writestr(
+                f"{safe_name}_tyoneratilastot.xlsx",
+                dataframe_to_excel_bytes(stats_df, sheet_name="Työnerätilastot")
+            )
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
 def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode: str = "streamlit"):
     if not person_day_infos:
         if ui_mode == "streamlit":
@@ -765,27 +817,84 @@ def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode:
             continue
 
         stats_df = compute_batch_run_statistics(day_info, batch_catalog)
+        fig1 = make_chart1(day_info, person_name)
+        fig3 = make_chart3(day_info, batch_catalog, person_name)
+        fig2 = make_chart2(day_info, person_name)
 
         if ui_mode == "streamlit":
+            safe_name = sanitize_filename(person_name)
+
             st.header(f"Henkilö: {person_name}")
             st.subheader("Kuvaaja 1 – Aikajanakaavio")
-            st.pyplot(make_chart1(day_info, person_name))
+            st.pyplot(fig1)
 
             st.subheader("Kuvaaja 1b – Työneräkaavio")
-            st.pyplot(make_chart3(day_info, batch_catalog, person_name))
+            st.pyplot(fig3)
 
             st.markdown("**Työneräkohtaiset yhtäjaksoisen tekemisen tilastot**")
             if stats_df.empty:
-                st.info("Eräluettelo-välilehdeltä ei löytynyt nimettyjä työneriä, joita olisi havaittu tässä datassa.")
+                st.info("Eräluettelo-välilehdeltä ei löytynyt nimettyjä tekemisaikaan kuuluvia työneriä, joita olisi havaittu tässä datassa.")
             else:
                 st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
             st.subheader("Kuvaaja 2 – Yhteenveto päivittäin")
-            st.pyplot(make_chart2(day_info, person_name))
+            st.pyplot(fig2)
+
+            st.markdown("**Lataa tiedostot**")
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.download_button(
+                    "Kuvaaja 1 (PNG)",
+                    data=figure_to_png_bytes(fig1),
+                    file_name=f"{safe_name}_kuvaaja1_aikajanakaavio.png",
+                    mime="image/png",
+                    use_container_width=True,
+                    key=f"dl_fig1_{safe_name}",
+                )
+            with c2:
+                st.download_button(
+                    "Kuvaaja 1b (PNG)",
+                    data=figure_to_png_bytes(fig3),
+                    file_name=f"{safe_name}_kuvaaja1b_tyonerakaavio.png",
+                    mime="image/png",
+                    use_container_width=True,
+                    key=f"dl_fig3_{safe_name}",
+                )
+            with c3:
+                st.download_button(
+                    "Kuvaaja 2 (PNG)",
+                    data=figure_to_png_bytes(fig2),
+                    file_name=f"{safe_name}_kuvaaja2_yhteenveto.png",
+                    mime="image/png",
+                    use_container_width=True,
+                    key=f"dl_fig2_{safe_name}",
+                )
+            with c4:
+                if stats_df.empty:
+                    st.caption("Ei ladattavaa Excel-taulukkoa")
+                else:
+                    st.download_button(
+                        "Tilastot (Excel)",
+                        data=dataframe_to_excel_bytes(stats_df, sheet_name="Työnerätilastot"),
+                        file_name=f"{safe_name}_tyoneratilastot.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key=f"dl_xlsx_{safe_name}",
+                    )
+
+            st.download_button(
+                "Lataa kaikki tämän henkilön tiedostot ZIP-pakettina",
+                data=build_person_zip(person_name, fig1, fig3, fig2, stats_df),
+                file_name=f"{safe_name}_kuvaajat_ja_tilastot.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key=f"dl_zip_{safe_name}",
+            )
+
+            plt.close(fig1)
+            plt.close(fig3)
+            plt.close(fig2)
         else:
-            make_chart1(day_info, person_name)
-            make_chart3(day_info, batch_catalog, person_name)
-            make_chart2(day_info, person_name)
             if not stats_df.empty:
                 print(f"\n{person_name} – Työneräkohtaiset yhtäjaksoisen tekemisen tilastot")
                 print(stats_df.to_string(index=False))
