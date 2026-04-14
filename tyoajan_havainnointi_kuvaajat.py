@@ -9,6 +9,7 @@ ja piirtää jokaiselle henkilölle omat kuvaajat:
                        Häiriöaika ja muu aika omilla väreillään.
   2. Työneräkaavio   – Tekemisaika yläpuolella, muut ajat alapuolella.
                        Työnerät esitetään omilla väreillään palkkeina.
+                       Lisäksi näytetään työneräkohtaiset jaksojen pituustilastot.
   3. Yhteenvetokuvaaja – Aikalajien prosenttiosuudet päivittäin.
 
 Käyttö:
@@ -19,6 +20,7 @@ Vaatimukset (requirements.txt):
   openpyxl
   matplotlib
   streamlit
+  pandas
 """
 
 import math
@@ -29,6 +31,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import openpyxl
+import pandas as pd
 
 # ── Tunnistetaan ajoympäristö ──────────────────────────────────────────────
 
@@ -40,21 +43,18 @@ except ImportError:
 
 # ── Asetukset ──────────────────────────────────────────────────────────────
 
-# Pieni väli päivien välissä (minuuteissa)
 GAP_BETWEEN_DAYS = 20
 
-# Symbolien koot (scatter-pisteille pinta-ala pisteinä²)
-MARKER_SIZE_HAIRIO = 600   # räjähdyssymboli
-MARKER_SIZE_MUU = 500      # ympyräsymboli
+MARKER_SIZE_HAIRIO = 600
+MARKER_SIZE_MUU = 500
 
-# Värit aikalajeille
 COLORS = {
-    "Tekemisaika": "#1976D2",   # sininen
-    "Apuaika":     "#FB8C00",   # oranssi
-    "Häiriöaika":  "#E53935",   # punainen
-    "Muu":         "#8E24AA",   # violetti
-    "Valmiusaika": "#43A047",   # vihreä
-    "Taukoaika":   "#757575",   # harmaa
+    "Tekemisaika": "#1976D2",
+    "Apuaika":     "#FB8C00",
+    "Häiriöaika":  "#E53935",
+    "Muu":         "#8E24AA",
+    "Valmiusaika": "#43A047",
+    "Taukoaika":   "#757575",
     "Tuntematon":  "#9E9E9E",
 }
 
@@ -62,6 +62,13 @@ SUMMARY_CATS = [
     "Tekemisaika", "Apuaika", "Häiriöaika",
     "Valmiusaika", "Taukoaika", "Muu", "Tuntematon",
 ]
+
+PERSON_COLUMNS = {
+    2: "Henkilö 1",  # C
+    3: "Henkilö 2",  # D
+    4: "Henkilö 3",  # E
+    5: "Henkilö 4",  # F
+}
 
 # ── Luokittelufunktio ──────────────────────────────────────────────────────
 
@@ -89,26 +96,90 @@ def classify_code(code) -> str:
 
 # ── Datan luku ─────────────────────────────────────────────────────────────
 
-def _normalize_person_name(value, index: int) -> str:
-    """Palauttaa henkilölle näytettävän nimen, mutta ei vaikuta yhdistämiseen tiedostojen välillä."""
-    if value is None or str(value).strip() == "":
-        return f"Henkilö {index}"
-    return " ".join(str(value).strip().split())
+def read_batch_catalog(wb) -> dict:
+    """
+    Lukee välilehden "Eräluettelo" ja palauttaa sanakirjan:
+      {code: {"name": "...", "category": "..."}}
+
+    Mukaan otetaan vain ne erät, joilla on erän nimi.
+    """
+    if "Eräluettelo" not in wb.sheetnames:
+        return {}
+
+    ws = wb["Eräluettelo"]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {}
+
+    header_idx = None
+    col_code = None
+    col_name = None
+    col_cat = None
+
+    for i, row in enumerate(rows):
+        if not row:
+            continue
+        normalized = [str(v).strip() if v is not None else "" for v in row]
+        if "Eränro" in normalized and "Erän nimi" in normalized:
+            header_idx = i
+            col_code = normalized.index("Eränro")
+            col_name = normalized.index("Erän nimi")
+            col_cat = normalized.index("Aikalaji") if "Aikalaji" in normalized else None
+            break
+
+    if header_idx is None:
+        return {}
+
+    batch_catalog = {}
+    for row in rows[header_idx + 1:]:
+        if not row:
+            continue
+
+        code = row[col_code] if col_code < len(row) else None
+        name = row[col_name] if col_name < len(row) else None
+        cat = row[col_cat] if (col_cat is not None and col_cat < len(row)) else None
+
+        if code is None or name is None:
+            continue
+
+        name_str = str(name).strip()
+        if not name_str:
+            continue
+
+        try:
+            code_num = float(str(code).replace(",", "."))
+            code_key = int(code_num) if code_num.is_integer() else code_num
+        except Exception:
+            code_key = str(code).strip()
+
+        batch_catalog[code_key] = {
+            "name": name_str,
+            "category": str(cat).strip() if cat is not None else "",
+        }
+
+    return batch_catalog
+
+
+def normalize_code_key(code):
+    try:
+        code_num = float(str(code).replace(",", "."))
+        return int(code_num) if code_num.is_integer() else code_num
+    except Exception:
+        return str(code).strip()
 
 
 def read_file(filepath) -> dict:
     """
     Lukee yhden Excel-tiedoston havaintodatan.
-    filepath voi olla tiedostopolku (str) tai Streamlitin UploadedFile-objekti.
 
     Palauttaa muodon:
     {
         "date": <date|None>,
         "persons": {
             "Henkilö 1": [obs, obs, ...],
-            "Henkilö 2": [...],
             ...
-        }
+        },
+        "batch_catalog": {code: {"name": ..., "category": ...}}
     }
     """
     try:
@@ -120,33 +191,20 @@ def read_file(filepath) -> dict:
         wb.close()
         raise ValueError("Tiedostosta puuttuu välilehti 'Havainnot'.")
 
+    batch_catalog = read_batch_catalog(wb)
+
     ws = wb["Havainnot"]
     rows = list(ws.iter_rows(values_only=True))
 
-    # Päivämäärä rivillä 3 (indeksi 2), sarakkeessa F (indeksi 5)
     date_val = rows[2][5] if len(rows) > 2 and len(rows[2]) > 5 else None
     meas_date = date_val.date() if isinstance(date_val, datetime) else None
 
     if len(rows) < 6:
         wb.close()
-        return {"date": meas_date, "persons": {}}
-
-    header_row = rows[4]  # oletus: otsikot rivillä 5
-
-    # Tässä lomakepohjassa varsinaiset henkilösarakkeet ovat aina:
-    #   C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
-    # Myöhemmissä sarakkeissa voi olla esimerkiksi nollia, huomiosarake tai muuta metadataa,
-    # eikä niitä saa tulkita henkilöiksi. Tämä oli syy virheelliseen "Henkilö 11" -tapaukseen.
-    person_columns = []
-    for col_idx in range(2, 6):
-        header_val = header_row[col_idx] if col_idx < len(header_row) else None
-        fixed_person_id = f"Henkilö {col_idx - 1}"
-        display_name = _normalize_person_name(header_val, col_idx - 1)
-        person_columns.append((col_idx, fixed_person_id, display_name))
+        return {"date": meas_date, "persons": {}, "batch_catalog": batch_catalog}
 
     person_observations = defaultdict(list)
 
-    # Havaintodata alkaa riviltä 6 (indeksi 5)
     for row in rows[5:]:
         if len(row) < 2 or row[0] is None or row[1] is None:
             continue
@@ -157,7 +215,7 @@ def read_file(filepath) -> dict:
         except (TypeError, ValueError):
             continue
 
-        for col_idx, person_name, display_name in person_columns:
+        for col_idx, person_name in PERSON_COLUMNS.items():
             code = row[col_idx] if col_idx < len(row) else None
             if code is None or str(code).strip() == "":
                 continue
@@ -166,21 +224,21 @@ def read_file(filepath) -> dict:
                 "hour": h,
                 "minute": m,
                 "code": code,
+                "code_key": normalize_code_key(code),
                 "category": classify_code(code),
-                "display_name": display_name,
             })
 
     wb.close()
-    return {"date": meas_date, "persons": dict(person_observations)}
+    return {
+        "date": meas_date,
+        "persons": dict(person_observations),
+        "batch_catalog": batch_catalog,
+    }
 
 
 # ── Apufunktiot ────────────────────────────────────────────────────────────
 
 def build_segments(series: list, category: str) -> list:
-    """
-    Ryhmittelee peräkkäiset saman aikalajin havainnot yhtenäisiksi jaksoiksi.
-    Palauttaa listan (x_alku, x_loppu) -pareista.
-    """
     segs = []
     in_seg = False
     seg_start = None
@@ -203,16 +261,13 @@ def build_segments(series: list, category: str) -> list:
     return segs
 
 
-
 def minutes_to_label(abs_minutes: float) -> str:
     h = int(abs_minutes // 60) % 24
     m = int(abs_minutes % 60)
     return f"{h:02d}:{m:02d}"
 
 
-
 def build_day_info(datasets: list) -> list:
-    """Laskee x-koordinaatit kullekin päivälle ja rakentaa day_info-listan."""
     day_info = []
     x_offset = 0
 
@@ -244,36 +299,23 @@ def build_day_info(datasets: list) -> list:
     return day_info
 
 
-
-def build_person_day_infos(file_datasets: list) -> dict:
+def build_person_day_infos(file_datasets: list):
     """
-    Rakentaa kaikista tiedostoista henkilökohtaiset day_info-rakenteet.
-
-    Henkilöt yhdistetään tiedostojen välillä SARAKKEEN PAIKAN perusteella,
-    ei nimen perusteella:
-      - sarake C = Henkilö 1
-      - sarake D = Henkilö 2
-      - sarake E = Henkilö 3
-      - sarake F = Henkilö 4
-      ...
-
-    Näin esimerkiksi "Henkilö 1" on aina sama henkilö kaikissa Excel-tiedostoissa,
-    vaikka otsikkoteksti vaihtelisi tai puuttuisi.
-
-    Palauttaa:
-      {
-        "Henkilö 1": [day_info, day_info, ...],
-        "Henkilö 2": [...],
-      }
+    Henkilöt yhdistetään tiedostojen välillä sarakepaikan perusteella:
+      C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
     """
     person_days = defaultdict(list)
+    merged_batch_catalog = {}
 
     for ds in file_datasets:
         date_val = ds["date"]
+        for code_key, info in ds.get("batch_catalog", {}).items():
+            if code_key not in merged_batch_catalog:
+                merged_batch_catalog[code_key] = info
+
         for person_name, observations in ds["persons"].items():
             if not observations:
                 continue
-
             person_days[person_name].append({
                 "date": date_val,
                 "observations": observations,
@@ -282,11 +324,11 @@ def build_person_day_infos(file_datasets: list) -> dict:
     for person_name in person_days:
         person_days[person_name].sort(key=lambda d: d["date"] or datetime.min.date())
 
-    return {
+    person_day_infos = {
         person_name: build_day_info(day_datasets)
         for person_name, day_datasets in person_days.items()
     }
-
+    return person_day_infos, merged_batch_catalog
 
 
 def get_xticks_for_day_info(day_info: list):
@@ -318,10 +360,99 @@ def get_xticks_for_day_info(day_info: list):
     return tick_positions, tick_labels, end_tick_positions
 
 
+def sort_code_key(code):
+    try:
+        return float(str(code).replace(",", "."))
+    except Exception:
+        return str(code)
+
+
+def format_batch_label(code_key, batch_catalog):
+    info = batch_catalog.get(code_key, {})
+    name = str(info.get("name", "")).strip()
+    code_text = str(code_key).replace(".0", "")
+    return f"{code_text} – {name}" if name else f"Työnerä {code_text}"
+
+
+def get_code_runs(series):
+    if not series:
+        return []
+
+    runs = []
+    current = series[0]
+    run_start_x = current["x"]
+    prev_x = current["x"]
+    run_len = 1
+
+    for obs in series[1:]:
+        if obs["code_key"] == current["code_key"]:
+            prev_x = obs["x"]
+            run_len += 1
+        else:
+            runs.append({
+                "x0": run_start_x,
+                "x1": prev_x + 1,
+                "length": run_len,
+                "category": current["category"],
+                "code": current["code"],
+                "code_key": current["code_key"],
+            })
+            current = obs
+            run_start_x = obs["x"]
+            prev_x = obs["x"]
+            run_len = 1
+
+    runs.append({
+        "x0": run_start_x,
+        "x1": prev_x + 1,
+        "length": run_len,
+        "category": current["category"],
+        "code": current["code"],
+        "code_key": current["code_key"],
+    })
+    return runs
+
+
+def compute_batch_run_statistics(day_info: list, batch_catalog: dict) -> pd.DataFrame:
+    """
+    Laskee työneräkohtaiset yhtäjaksoisten jaksojen pituustilastot.
+    Mukaan otetaan vain sellaiset erät, joilla on nimi Eräluettelo-välilehdellä.
+    """
+    lengths_by_code = defaultdict(list)
+    category_by_code = {}
+
+    for day in day_info:
+        for run in get_code_runs(day["series"]):
+            code_key = run["code_key"]
+            if code_key not in batch_catalog:
+                continue
+            lengths_by_code[code_key].append(run["length"])
+            category_by_code[code_key] = run["category"]
+
+    rows = []
+    for code_key in sorted(lengths_by_code.keys(), key=sort_code_key):
+        lengths = lengths_by_code[code_key]
+        if not lengths:
+            continue
+
+        info = batch_catalog.get(code_key, {})
+        rows.append({
+            "Eränro": str(code_key).replace(".0", ""),
+            "Erän nimi": info.get("name", ""),
+            "Aikalaji": category_by_code.get(code_key, info.get("category", "")),
+            "Jaksoja (n)": len(lengths),
+            "Min (min)": int(min(lengths)),
+            "Max (min)": int(max(lengths)),
+            "Keskiarvo (min)": round(sum(lengths) / len(lengths), 2),
+            "Keskihajonta": round(pd.Series(lengths).std(ddof=1), 2) if len(lengths) > 1 else 0.0,
+        })
+
+    return pd.DataFrame(rows)
+
+
 # ── Kuvaajien piirto ───────────────────────────────────────────────────────
 
 def make_chart1(day_info: list, person_name: str = ""):
-    """Aikajanakaavio."""
     fig, ax = plt.subplots(figsize=(20, 4))
     fig.patch.set_facecolor("#F5F5F5")
     ax.set_facecolor("#FAFAFA")
@@ -331,58 +462,32 @@ def make_chart1(day_info: list, person_name: str = ""):
         series = day["series"]
 
         for x0, x1 in build_segments(series, "Tekemisaika"):
-            ax.broken_barh(
-                [(x0, x1 - x0)], (0, 1),
-                facecolor=COLORS["Tekemisaika"], alpha=0.85,
-                label="Tekemisaika" if first_day else "",
-            )
+            ax.broken_barh([(x0, x1 - x0)], (0, 1), facecolor=COLORS["Tekemisaika"], alpha=0.85,
+                           label="Tekemisaika" if first_day else "")
 
         for x0, x1 in build_segments(series, "Apuaika"):
-            ax.broken_barh(
-                [(x0, x1 - x0)], (-1, 1),
-                facecolor=COLORS["Apuaika"], alpha=0.85,
-                label="Apuaika" if first_day else "",
-            )
+            ax.broken_barh([(x0, x1 - x0)], (-1, 1), facecolor=COLORS["Apuaika"], alpha=0.85,
+                           label="Apuaika" if first_day else "")
 
         for x0, x1 in build_segments(series, "Valmiusaika"):
-            ax.broken_barh(
-                [(x0, x1 - x0)], (0, 1),
-                facecolor=COLORS["Valmiusaika"], alpha=0.85,
-                label="Valmiusaika" if first_day else "",
-            )
+            ax.broken_barh([(x0, x1 - x0)], (0, 1), facecolor=COLORS["Valmiusaika"], alpha=0.85,
+                           label="Valmiusaika" if first_day else "")
 
         for x0, x1 in build_segments(series, "Taukoaika"):
-            ax.broken_barh(
-                [(x0, x1 - x0)], (-1, 1),
-                facecolor=COLORS["Taukoaika"], alpha=0.70,
-                label="Taukoaika" if first_day else "",
-            )
+            ax.broken_barh([(x0, x1 - x0)], (-1, 1), facecolor=COLORS["Taukoaika"], alpha=0.70,
+                           label="Taukoaika" if first_day else "")
 
         hairio = [o["x"] + 0.5 for o in series if o["category"] == "Häiriöaika"]
         if hairio:
-            ax.scatter(
-                hairio, [0] * len(hairio),
-                marker=(10, 1, 0),
-                s=MARKER_SIZE_HAIRIO,
-                color=COLORS["Häiriöaika"],
-                zorder=6,
-                label="Häiriöaika" if first_day else "",
-                linewidths=0.5,
-                edgecolors="white",
-            )
+            ax.scatter(hairio, [0] * len(hairio), marker=(10, 1, 0), s=MARKER_SIZE_HAIRIO,
+                       color=COLORS["Häiriöaika"], zorder=6, label="Häiriöaika" if first_day else "",
+                       linewidths=0.5, edgecolors="white")
 
         muu = [o["x"] + 0.5 for o in series if o["category"] == "Muu"]
         if muu:
-            ax.scatter(
-                muu, [0] * len(muu),
-                marker="o",
-                s=MARKER_SIZE_MUU,
-                color=COLORS["Muu"],
-                zorder=6,
-                label="Muu" if first_day else "",
-                linewidths=0.8,
-                edgecolors="white",
-            )
+            ax.scatter(muu, [0] * len(muu), marker="o", s=MARKER_SIZE_MUU,
+                       color=COLORS["Muu"], zorder=6, label="Muu" if first_day else "",
+                       linewidths=0.8, edgecolors="white")
 
         first_day = False
 
@@ -406,19 +511,8 @@ def make_chart1(day_info: list, person_name: str = ""):
         date_label = day["date"].strftime("%d.%m.%Y") if day["date"] else "?"
         x_start = day["x_start"]
         ax.axvline(x_start, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
-        ax.text(
-            x_start + 1.0,
-            -1.45,
-            date_label,
-            rotation=90,
-            rotation_mode="anchor",
-            ha="left",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color="#444444",
-            zorder=5,
-        )
+        ax.text(x_start + 1.0, -1.45, date_label, rotation=90, rotation_mode="anchor",
+                ha="left", va="bottom", fontsize=9, fontweight="bold", color="#444444", zorder=5)
 
     if len(day_info) > 1:
         for i in range(len(day_info) - 1):
@@ -442,17 +536,14 @@ def make_chart1(day_info: list, person_name: str = ""):
         mpatches.Patch(color=COLORS["Apuaika"], label="Apuaika"),
         mpatches.Patch(color=COLORS["Valmiusaika"], label="Valmiusaika"),
         mpatches.Patch(color=COLORS["Taukoaika"], label="Taukoaika"),
-        plt.Line2D([0], [0], marker=(10, 1, 0), color="w",
-                   markerfacecolor=COLORS["Häiriöaika"], markersize=14, label="Häiriöaika"),
-        plt.Line2D([0], [0], marker="o", color="w",
-                   markerfacecolor=COLORS["Muu"], markersize=12, label="Muu"),
-        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5,
-                   label="Mittauksen aloitus"),
-        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5,
-                   label="Mittauksen päättyminen"),
+        plt.Line2D([0], [0], marker=(10, 1, 0), color="w", markerfacecolor=COLORS["Häiriöaika"],
+                   markersize=14, label="Häiriöaika"),
+        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=COLORS["Muu"],
+                   markersize=12, label="Muu"),
+        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5, label="Mittauksen aloitus"),
+        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5, label="Mittauksen päättyminen"),
     ]
-    ax.legend(handles=legend_handles, loc="lower right",
-              framealpha=0.9, fontsize=8, ncol=4)
+    ax.legend(handles=legend_handles, loc="lower right", framealpha=0.9, fontsize=8, ncol=4)
 
     title = "Aikalajit ajan suhteen – minuuttihavainnot"
     if person_name:
@@ -463,12 +554,9 @@ def make_chart1(day_info: list, person_name: str = ""):
     return fig
 
 
-
 def make_chart2(day_info: list, person_name: str = ""):
-    """Yhteenvetokuvaaja – aikalajien prosenttiosuudet päivittäin."""
     n_days = len(day_info)
-    fig, axes = plt.subplots(1, n_days, figsize=(max(5 * n_days, 6), 5),
-                             sharey=False, squeeze=False)
+    fig, axes = plt.subplots(1, n_days, figsize=(max(5 * n_days, 6), 5), sharey=False, squeeze=False)
     fig.patch.set_facecolor("#F5F5F5")
 
     title = "Aikalajien osuudet päivittäin"
@@ -482,23 +570,23 @@ def make_chart2(day_info: list, person_name: str = ""):
         total = len(day["series"])
 
         pcts = [
-            100 * sum(1 for o in day["series"] if o["category"] == cat) / total
-            if total > 0 else 0
+            100 * sum(1 for o in day["series"] if o["category"] == cat) / total if total > 0 else 0
             for cat in SUMMARY_CATS
         ]
 
         bars = ax.barh(
-            SUMMARY_CATS, pcts,
+            SUMMARY_CATS,
+            pcts,
             color=[COLORS.get(c, "#BDBDBD") for c in SUMMARY_CATS],
-            edgecolor="white", height=0.65, alpha=0.9,
+            edgecolor="white",
+            height=0.65,
+            alpha=0.9,
         )
 
         for bar, pct in zip(bars, pcts):
             if pct > 0.5:
-                ax.text(bar.get_width() + 0.5,
-                        bar.get_y() + bar.get_height() / 2,
-                        f"{pct:.1f} %",
-                        va="center", ha="left", fontsize=9, color="#333333")
+                ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                        f"{pct:.1f} %", va="center", ha="left", fontsize=9, color="#333333")
 
         label = day["date"].strftime("%d.%m.%Y") if day["date"] else "?"
         ax.set_title(label, fontsize=11, fontweight="bold")
@@ -511,81 +599,42 @@ def make_chart2(day_info: list, person_name: str = ""):
         ax.spines["bottom"].set_color("#CCCCCC")
         ax.grid(axis="x", color="#E0E0E0", linestyle="-", linewidth=0.5)
 
-        ax.text(0.02, 0.98,
-                f"n = {total} havaintoa / ≈ {total} min",
-                transform=ax.transAxes, ha="left", va="top",
-                fontsize=8, color="#777777")
+        ax.text(0.02, 0.98, f"n = {total} havaintoa / ≈ {total} min",
+                transform=ax.transAxes, ha="left", va="top", fontsize=8, color="#777777")
 
     plt.tight_layout()
     return fig
 
 
-
-def make_chart3(day_info: list, person_name: str = ""):
+def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
     """
     Työneräkaavio:
-    - Tekemisaika ja valmiusaika piirretään vaaka-akselin yläpuolelle
-    - Apuaika piirretään vaaka-akselin alapuolelle työnerän värillä
-    - Häiriöaika, muu ja taukoaika piirretään myös alapuolelle kiinteillä väreillä
-    - Peräkkäiset saman koodin havainnot yhdistetään yhdeksi jaksoksi
+    - Tekemisaika ja valmiusaika yläpuolella
+    - Apuaika alapuolella työnerän värillä
+    - Häiriöaika, muu, taukoaika ja tuntematon alapuolella kiinteillä väreillä
+    - Legendassa näkyvät työnerän numero + nimi, jos nimi löytyy Eräluettelo-välilehdeltä
     """
-
-    def sort_code_key(code):
-        try:
-            return float(str(code).replace(",", "."))
-        except Exception:
-            return str(code)
-
     def build_code_colors(day_info_local):
         unique_codes = []
         seen = set()
 
         for day in day_info_local:
             for obs in day["series"]:
+                if obs["code_key"] not in batch_catalog:
+                    continue
                 if obs["category"] not in ("Tekemisaika", "Apuaika", "Valmiusaika"):
                     continue
-                code = obs["code"]
-                if code not in seen:
-                    seen.add(code)
-                    unique_codes.append(code)
+                code_key = obs["code_key"]
+                if code_key not in seen:
+                    seen.add(code_key)
+                    unique_codes.append(code_key)
 
         unique_codes = sorted(unique_codes, key=sort_code_key)
         cmap = plt.get_cmap("tab20")
         color_map = {}
-        for i, code in enumerate(unique_codes):
-            color_map[code] = cmap(i % 20)
+        for i, code_key in enumerate(unique_codes):
+            color_map[code_key] = cmap(i % 20)
         return color_map, unique_codes
-
-    def get_code_runs(series):
-        if not series:
-            return []
-
-        runs = []
-        current = series[0]
-        run_start_x = current["x"]
-        prev_x = current["x"]
-
-        for obs in series[1:]:
-            if obs["code"] == current["code"]:
-                prev_x = obs["x"]
-            else:
-                runs.append({
-                    "x0": run_start_x,
-                    "x1": prev_x + 1,
-                    "category": current["category"],
-                    "code": current["code"],
-                })
-                current = obs
-                run_start_x = obs["x"]
-                prev_x = obs["x"]
-
-        runs.append({
-            "x0": run_start_x,
-            "x1": prev_x + 1,
-            "category": current["category"],
-            "code": current["code"],
-        })
-        return runs
 
     code_colors, unique_codes = build_code_colors(day_info)
 
@@ -602,39 +651,21 @@ def make_chart3(day_info: list, person_name: str = ""):
             x0 = run["x0"]
             width = run["x1"] - run["x0"]
             cat = run["category"]
-            code = run["code"]
+            code_key = run["code_key"]
 
-            if cat in ("Tekemisaika", "Valmiusaika"):
-                color = code_colors.get(code, COLORS["Tekemisaika"])
-                used_codes.add(code)
-                ax.broken_barh(
-                    [(x0, width)], (0, 1),
-                    facecolor=color,
-                    edgecolor="white",
-                    linewidth=0.6,
-                    alpha=0.95,
-                    zorder=3,
-                )
-            elif cat == "Apuaika":
-                color = code_colors.get(code, COLORS["Apuaika"])
-                used_codes.add(code)
-                ax.broken_barh(
-                    [(x0, width)], (-1, 1),
-                    facecolor=color,
-                    edgecolor="white",
-                    linewidth=0.6,
-                    alpha=0.95,
-                    zorder=3,
-                )
-            elif cat in ("Häiriöaika", "Muu", "Taukoaika", "Tuntematon"):
-                ax.broken_barh(
-                    [(x0, width)], (-1, 1),
-                    facecolor=COLORS.get(cat, COLORS["Tuntematon"]),
-                    edgecolor="white",
-                    linewidth=0.6,
-                    alpha=0.95,
-                    zorder=3,
-                )
+            if cat in ("Tekemisaika", "Valmiusaika") and code_key in batch_catalog:
+                color = code_colors.get(code_key, COLORS["Tekemisaika"])
+                used_codes.add(code_key)
+                ax.broken_barh([(x0, width)], (0, 1), facecolor=color, edgecolor="white",
+                               linewidth=0.6, alpha=0.95, zorder=3)
+            elif cat == "Apuaika" and code_key in batch_catalog:
+                color = code_colors.get(code_key, COLORS["Apuaika"])
+                used_codes.add(code_key)
+                ax.broken_barh([(x0, width)], (-1, 1), facecolor=color, edgecolor="white",
+                               linewidth=0.6, alpha=0.95, zorder=3)
+            elif cat in ("Häiriöaika", "Muu", "Taukoaika", "Tuntematon") or code_key not in batch_catalog:
+                ax.broken_barh([(x0, width)], (-1, 1), facecolor=COLORS.get(cat, COLORS["Tuntematon"]),
+                               edgecolor="white", linewidth=0.6, alpha=0.95, zorder=3)
 
     tick_positions, tick_labels, end_tick_positions = get_xticks_for_day_info(day_info)
     ax.set_xticks(tick_positions)
@@ -656,19 +687,8 @@ def make_chart3(day_info: list, person_name: str = ""):
         date_label = day["date"].strftime("%d.%m.%Y") if day["date"] else "?"
         x_start = day["x_start"]
         ax.axvline(x_start, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
-        ax.text(
-            x_start + 1.0,
-            -1.45,
-            date_label,
-            rotation=90,
-            rotation_mode="anchor",
-            ha="left",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color="#444444",
-            zorder=5,
-        )
+        ax.text(x_start + 1.0, -1.45, date_label, rotation=90, rotation_mode="anchor",
+                ha="left", va="bottom", fontsize=9, fontweight="bold", color="#444444", zorder=5)
 
     if len(day_info) > 1:
         for i in range(len(day_info) - 1):
@@ -689,29 +709,22 @@ def make_chart3(day_info: list, person_name: str = ""):
     ax.grid(axis="x", color="#E0E0E0", linestyle="-", linewidth=0.5, zorder=0)
 
     code_handles = [
-        mpatches.Patch(color=code_colors[code], label=f"Työnerä {code}")
-        for code in unique_codes if code in used_codes
+        mpatches.Patch(color=code_colors[code_key], label=format_batch_label(code_key, batch_catalog))
+        for code_key in unique_codes if code_key in used_codes
     ]
     fixed_handles = [
         mpatches.Patch(color=COLORS["Häiriöaika"], label="Häiriöaika"),
         mpatches.Patch(color=COLORS["Muu"], label="Muu"),
         mpatches.Patch(color=COLORS["Taukoaika"], label="Taukoaika"),
-        mpatches.Patch(color=COLORS["Tuntematon"], label="Tuntematon"),
-        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5,
-                   label="Mittauksen aloitus"),
-        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5,
-                   label="Mittauksen päättyminen"),
+        mpatches.Patch(color=COLORS["Tuntematon"], label="Tuntematon / nimeämätön erä"),
+        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5, label="Mittauksen aloitus"),
+        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5, label="Mittauksen päättyminen"),
     ]
     legend_handles = code_handles + fixed_handles
 
-    ax.legend(
-        handles=legend_handles,
-        loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
-        framealpha=0.95,
-        fontsize=8,
-        ncol=min(6, max(3, (len(legend_handles) + 1) // 2)),
-    )
+    ax.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, -0.22),
+              framealpha=0.95, fontsize=8,
+              ncol=min(4, max(2, (len(legend_handles) + 2) // 3)))
 
     title = "Työneräkaavio – työnerät väreillä, muut ajat alapuolella"
     if person_name:
@@ -721,9 +734,10 @@ def make_chart3(day_info: list, person_name: str = ""):
     plt.tight_layout()
     return fig
 
+
 # ── Käyttöliittymät ────────────────────────────────────────────────────────
 
-def render_person_sections(person_day_infos: dict, ui_mode: str = "streamlit"):
+def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode: str = "streamlit"):
     if not person_day_infos:
         if ui_mode == "streamlit":
             st.warning("Valituissa tiedostoissa ei ole havaintodataa.")
@@ -737,21 +751,31 @@ def render_person_sections(person_day_infos: dict, ui_mode: str = "streamlit"):
         if not day_info:
             continue
 
+        stats_df = compute_batch_run_statistics(day_info, batch_catalog)
+
         if ui_mode == "streamlit":
             st.header(f"Henkilö: {person_name}")
             st.subheader("Kuvaaja 1 – Aikajanakaavio")
             st.pyplot(make_chart1(day_info, person_name))
 
             st.subheader("Kuvaaja 1b – Työneräkaavio")
-            st.pyplot(make_chart3(day_info, person_name))
+            st.pyplot(make_chart3(day_info, batch_catalog, person_name))
+
+            st.markdown("**Työneräkohtaiset yhtäjaksoisen tekemisen tilastot**")
+            if stats_df.empty:
+                st.info("Eräluettelo-välilehdeltä ei löytynyt nimettyjä työneriä, joita olisi havaittu tässä datassa.")
+            else:
+                st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
             st.subheader("Kuvaaja 2 – Yhteenveto päivittäin")
             st.pyplot(make_chart2(day_info, person_name))
         else:
             make_chart1(day_info, person_name)
-            make_chart3(day_info, person_name)
+            make_chart3(day_info, batch_catalog, person_name)
             make_chart2(day_info, person_name)
-
+            if not stats_df.empty:
+                print(f"\n{person_name} – Työneräkohtaiset yhtäjaksoisen tekemisen tilastot")
+                print(stats_df.to_string(index=False))
 
 
 def run_streamlit():
@@ -781,9 +805,8 @@ def run_streamlit():
     if not file_datasets:
         st.stop()
 
-    person_day_infos = build_person_day_infos(file_datasets)
-    render_person_sections(person_day_infos, ui_mode="streamlit")
-
+    person_day_infos, batch_catalog = build_person_day_infos(file_datasets)
+    render_person_sections(person_day_infos, batch_catalog, ui_mode="streamlit")
 
 
 def run_local():
@@ -822,12 +845,10 @@ def run_local():
     if not file_datasets:
         sys.exit(1)
 
-    person_day_infos = build_person_day_infos(file_datasets)
-    render_person_sections(person_day_infos, ui_mode="local")
+    person_day_infos, batch_catalog = build_person_day_infos(file_datasets)
+    render_person_sections(person_day_infos, batch_catalog, ui_mode="local")
     plt.show()
 
-
-# ── Käynnistys ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     if STREAMLIT:
