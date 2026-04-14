@@ -665,6 +665,38 @@ def format_batch_label(code_key, batch_catalog):
     return f"{code_text} – {name}" if name else f"Työnerä {code_text}"
 
 
+def build_chart3_legend_df(day_info: list, batch_catalog: dict) -> pd.DataFrame:
+    """
+    Rakentaa työneräkaavion selitteen omaksi taulukokseen,
+    jotta varsinainen kuvaaja ei täyty legendasta.
+    """
+    used_codes = set()
+
+    for day in day_info:
+        for run in get_code_runs(day["series"]):
+            if run["category"] in ("Tekemisaika", "Apuaika", "Valmiusaika") and run["code_key"] in batch_catalog:
+                used_codes.add(run["code_key"])
+
+    rows = []
+    for code_key in sorted(used_codes, key=sort_code_key):
+        info = batch_catalog.get(code_key, {})
+        rows.append({
+            "Koodi": str(code_key).replace(".0", ""),
+            "Selite": str(info.get("name", "")).strip() or format_batch_label(code_key, batch_catalog),
+            "Ryhmä": str(info.get("category", "")).strip() or "Työnerä",
+        })
+
+    rows.extend([
+        {"Koodi": "-", "Selite": "Häiriöaika", "Ryhmä": "Kiinteä väri"},
+        {"Koodi": "-", "Selite": "Muu", "Ryhmä": "Kiinteä väri"},
+        {"Koodi": "-", "Selite": "Taukoaika", "Ryhmä": "Kiinteä väri"},
+        {"Koodi": "-", "Selite": "Tuntematon / nimeämätön erä", "Ryhmä": "Kiinteä väri"},
+        {"Koodi": "-", "Selite": "Mittauksen aloitus", "Ryhmä": "Merkintä"},
+        {"Koodi": "-", "Selite": "Mittauksen päättyminen", "Ryhmä": "Merkintä"},
+    ])
+
+    return pd.DataFrame(rows)
+
 def get_code_runs(series):
     if not series:
         return []
@@ -1012,40 +1044,12 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
     ax.spines["bottom"].set_color("#CCCCCC")
     ax.grid(axis="x", color="#E0E0E0", linestyle="-", linewidth=0.5, zorder=0)
 
-    code_handles = [
-        mpatches.Patch(color=code_colors[code_key], label=format_batch_label(code_key, batch_catalog))
-        for code_key in unique_codes if code_key in used_codes
-    ]
-    fixed_handles = [
-        mpatches.Patch(color=COLORS["Häiriöaika"], label="Häiriöaika"),
-        mpatches.Patch(color=COLORS["Muu"], label="Muu"),
-        mpatches.Patch(color=COLORS["Taukoaika"], label="Taukoaika"),
-        mpatches.Patch(color=COLORS["Tuntematon"], label="Tuntematon / nimeämätön erä"),
-        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5, label="Mittauksen aloitus"),
-        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5, label="Mittauksen päättyminen"),
-    ]
-    legend_handles = code_handles + fixed_handles
-
-    legend_cols = min(3, max(2, len(legend_handles) // 8 + 1))
-    fig.legend(
-        handles=legend_handles,
-        loc="lower center",
-        bbox_to_anchor=(0.5, -0.06),
-        framealpha=0.95,
-        fontsize=6.8,
-        ncol=legend_cols,
-        borderaxespad=0.8,
-        columnspacing=1.2,
-        handlelength=1.6,
-        handletextpad=0.5,
-    )
-
     title = "Työneräkaavio – työnerät väreillä, muut ajat alapuolella"
     if person_name:
         title += f" ({person_name})"
     ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
 
-    fig.subplots_adjust(left=0.07, right=0.99, top=0.84, bottom=0.62)
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.84, bottom=0.24)
     return fig
 
 
@@ -1128,6 +1132,10 @@ def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode:
 
             st.subheader("Kuvaaja 1b – Työneräkaavio")
             st.pyplot(fig3)
+
+            legend_df = build_chart3_legend_df(day_info, batch_catalog)
+            with st.expander("Näytä työneräkaavion selitteet", expanded=False):
+                st.dataframe(legend_df, use_container_width=True, hide_index=True)
 
             st.markdown("**Työneräkohtaiset yhtäjaksoisen tekemisen tilastot**")
             if stats_df.empty:
