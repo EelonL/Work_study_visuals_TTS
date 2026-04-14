@@ -942,7 +942,7 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
 
     code_colors, unique_codes = build_code_colors(day_info)
 
-    fig, ax = plt.subplots(figsize=(22, 5.0))
+    fig, ax = plt.subplots(figsize=(22, 6.2))
     fig.patch.set_facecolor("#F5F5F5")
     ax.set_facecolor("#FAFAFA")
 
@@ -1030,9 +1030,9 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
     fig.legend(
         handles=legend_handles,
         loc="lower center",
-        bbox_to_anchor=(0.5, 0.02),
+        bbox_to_anchor=(0.5, 0.005),
         framealpha=0.95,
-        fontsize=7,
+        fontsize=6.8,
         ncol=legend_cols,
         borderaxespad=0.8,
         columnspacing=1.2,
@@ -1045,7 +1045,7 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
         title += f" ({person_name})"
     ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
 
-    fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.40)
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.84, bottom=0.52)
     return fig
 
 
