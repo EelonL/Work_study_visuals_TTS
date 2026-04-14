@@ -942,7 +942,7 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
 
     code_colors, unique_codes = build_code_colors(day_info)
 
-    fig, ax = plt.subplots(figsize=(20, 4.2))
+    fig, ax = plt.subplots(figsize=(22, 5.0))
     fig.patch.set_facecolor("#F5F5F5")
     ax.set_facecolor("#FAFAFA")
 
@@ -1026,16 +1026,26 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
     ]
     legend_handles = code_handles + fixed_handles
 
-    ax.legend(handles=legend_handles, loc="upper center", bbox_to_anchor=(0.5, -0.22),
-              framealpha=0.95, fontsize=8,
-              ncol=min(4, max(2, (len(legend_handles) + 2) // 3)))
+    legend_cols = min(3, max(2, len(legend_handles) // 8 + 1))
+    fig.legend(
+        handles=legend_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.02),
+        framealpha=0.95,
+        fontsize=7,
+        ncol=legend_cols,
+        borderaxespad=0.8,
+        columnspacing=1.2,
+        handlelength=1.6,
+        handletextpad=0.5,
+    )
 
     title = "Työneräkaavio – työnerät väreillä, muut ajat alapuolella"
     if person_name:
         title += f" ({person_name})"
     ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
 
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.07, right=0.99, top=0.82, bottom=0.40)
     return fig
 
 
