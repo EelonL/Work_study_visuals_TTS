@@ -26,7 +26,7 @@ Vaatimukset (requirements.txt):
 import math
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from io import BytesIO
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -92,9 +92,262 @@ def classify_code(code) -> str:
         return "Häiriöaika"
     if 56 <= c <= 59:
         return "Muu"
-    if c >= 60:
+    if c == 60:
         return "Taukoaika"
     return "Tuntematon"
+
+
+STOPWORDS_FI = {
+    "ja", "tai", "sekä", "myös", "samalla", "kanssa", "että", "oli", "lopulta",
+    "käyttää", "käyttääkö", "käytti", "katsoo", "katsoo", "lukee", "puhuu",
+    "soittaa", "kirjoittaa", "täyttää", "edelleen", "jolla", "jossa", "jonka",
+    "the", "of", "mm", "ei", "on", "oli", "kun", "jos", "esim", "sis",
+    "työ", "työasia", "työpisteessä"
+}
+
+
+def normalize_text(value) -> str:
+    text = str(value or "").lower()
+    text = text.replace("å", "a").replace("ä", "a").replace("ö", "o")
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def text_tokens(value) -> list:
+    tokens = []
+    for tok in normalize_text(value).split():
+        if len(tok) < 3:
+            continue
+        if tok in STOPWORDS_FI:
+            continue
+        tokens.append(tok)
+    return tokens
+
+
+def token_roots(tokens: list) -> set:
+    roots = set()
+    for tok in tokens:
+        roots.add(tok)
+        if len(tok) >= 6:
+            roots.add(tok[:5])
+        elif len(tok) >= 4:
+            roots.add(tok[:4])
+    return roots
+
+
+def build_catalog_match_index(batch_catalog: dict) -> dict:
+    index = {}
+    for code_key, info in batch_catalog.items():
+        name = str(info.get("name", "")).strip()
+        if not name:
+            continue
+        tokens = text_tokens(name)
+        index[code_key] = {
+            "tokens": tokens,
+            "roots": token_roots(tokens),
+            "name_norm": normalize_text(name),
+            "category": str(info.get("category", "")).strip(),
+            "name": name,
+        }
+    return index
+
+
+def score_note_against_item(note: str, item: dict) -> float:
+    note_norm = normalize_text(note)
+    note_tokens = text_tokens(note)
+    note_roots = token_roots(note_tokens)
+
+    score = 0.0
+    overlap = note_roots.intersection(item["roots"])
+    score += 2.5 * len(overlap)
+
+    for tok in item["tokens"]:
+        if len(tok) >= 4 and tok in note_norm:
+            score += 1.5
+
+    # Hyvin lyhyet mutta tärkeät osumat
+    if "excel" in note_norm and "excel" in item["name_norm"]:
+        score += 2
+    if "teams" in note_norm and "teams" in item["name_norm"]:
+        score += 2
+    if "winbus" in note_norm and "winbus" in item["name_norm"]:
+        score += 2
+    if "whatsapp" in note_norm and "whatsapp" in item["name_norm"]:
+        score += 2
+    if "puhelu" in note_norm and "puhelu" in item["name_norm"]:
+        score += 2
+    if "sahkopost" in note_norm and "sahkopost" in item["name_norm"]:
+        score += 2
+    if "kuljettaj" in note_norm and "kuljettaj" in item["name_norm"]:
+        score += 2
+    if "keskustel" in note_norm and "keskustel" in item["name_norm"]:
+        score += 1
+
+    return score
+
+
+def find_digit_segmentations(code_key, valid_codes: set, max_parts: int = 4) -> list:
+    code_str = str(code_key).replace(".0", "")
+    if not code_str.isdigit():
+        return []
+
+    results = []
+
+    def rec(pos: int, parts: list):
+        if pos == len(code_str):
+            if 2 <= len(parts) <= max_parts:
+                results.append(parts.copy())
+            return
+        if len(parts) >= max_parts:
+            return
+
+        for length in (2, 1):
+            part = code_str[pos:pos + length]
+            if not part:
+                continue
+            if part.startswith("0"):
+                continue
+            part_int = int(part)
+            if part_int in valid_codes:
+                parts.append(part_int)
+                rec(pos + length, parts)
+                parts.pop()
+
+    rec(0, [])
+    unique = []
+    seen = set()
+    for seg in results:
+        tup = tuple(seg)
+        if tup not in seen:
+            seen.add(tup)
+            unique.append(seg)
+    return unique
+
+
+def choose_best_segmentation(code_key, note: str, batch_catalog: dict, catalog_index: dict):
+    valid_codes = {k for k in batch_catalog.keys() if isinstance(k, int) and 1 <= k <= 60}
+    segmentations = find_digit_segmentations(code_key, valid_codes)
+    if not segmentations:
+        return []
+
+    best = []
+    best_score = -1.0
+    for seg in segmentations:
+        score = 0.0
+        for part in seg:
+            item = catalog_index.get(part)
+            if item:
+                score += score_note_against_item(note, item)
+        # Pieni bonus kahden tai kolmen osan selityksille
+        if 2 <= len(seg) <= 3:
+            score += 0.5
+        if score > best_score:
+            best_score = score
+            best = seg
+
+    return best if best_score > 0 else []
+
+
+def infer_combined_code_info(code_key, notes: list, batch_catalog: dict, catalog_index: dict) -> dict:
+    """
+    Päättelee yhdistelmäkoodille nimen ja aikalajin.
+    Tavoite:
+    - käyttää ensisijaisesti Eräluettelo-välilehden nimiä
+    - jos se ei onnistu, käyttää huomiosarakkeen yleisintä tekstiä
+    - ei luokittele tuntematonta yhdistelmäkoodia tauoksi
+    """
+    notes = [str(n).strip() for n in notes if str(n or "").strip()]
+    note_counter = Counter(notes)
+    main_note = note_counter.most_common(1)[0][0] if note_counter else ""
+
+    seg = choose_best_segmentation(code_key, main_note, batch_catalog, catalog_index)
+    if seg:
+        names = []
+        categories = []
+        for part in seg:
+            info = batch_catalog.get(part, {})
+            name = str(info.get("name", "")).strip()
+            if name:
+                names.append(name)
+            cat = str(info.get("category", "")).strip()
+            if cat:
+                categories.append(cat)
+
+        if names:
+            category = categories[0] if categories and len(set(categories)) == 1 else (categories[0] if categories else "Tekemisaika")
+            return {
+                "name": " + ".join(names),
+                "category": category or "Tekemisaika",
+                "synthetic": True,
+                "source": "digit_segmentation"
+            }
+
+    # Tekstihaku Eräluettelon nimistä
+    scored = []
+    for base_code, item in catalog_index.items():
+        sc = score_note_against_item(main_note, item)
+        if sc >= 3.5:
+            scored.append((sc, base_code))
+    scored.sort(reverse=True)
+
+    chosen = []
+    used = set()
+    for sc, base_code in scored:
+        if base_code in used:
+            continue
+        chosen.append((sc, base_code))
+        used.add(base_code)
+        if len(chosen) >= 2:
+            break
+
+    note_looks_combined = any(marker in normalize_text(main_note) for marker in [" samalla ", " ja ", "+"])
+
+    if chosen:
+        top_score = chosen[0][0]
+        chosen_codes = [base_code for _, base_code in chosen]
+
+        # Jos huomio-teksti selvästi kuvaa yhdistelmätekemistä, mutta löytyi vain
+        # yksi heikko osuma, käytetään mieluummin huomio-tekstiä sellaisenaan.
+        if not (len(chosen_codes) == 1 and note_looks_combined and top_score < 6.0):
+            names = []
+            categories = []
+            for base_code in chosen_codes:
+                info = batch_catalog.get(base_code, {})
+                nm = str(info.get("name", "")).strip()
+                if nm:
+                    names.append(nm)
+                cat = str(info.get("category", "")).strip()
+                if cat:
+                    categories.append(cat)
+
+            allow_note_match = (
+                len(chosen_codes) >= 2 or
+                (len(chosen_codes) == 1 and (not note_looks_combined) and top_score >= 7.5)
+            )
+            if names and allow_note_match and top_score >= 4.5:
+                category = categories[0] if categories and len(set(categories)) == 1 else (categories[0] if categories else "Tekemisaika")
+                return {
+                    "name": " + ".join(names),
+                    "category": category or "Tekemisaika",
+                    "synthetic": True,
+                    "source": "note_match"
+                }
+
+    # Viimeinen turvallinen fallback: käytetään huomio-tekstiä työnerän nimenä
+    if main_note:
+        return {
+            "name": main_note,
+            "category": "Tekemisaika",
+            "synthetic": True,
+            "source": "note_fallback"
+        }
+
+    return {
+        "name": "",
+        "category": "Tuntematon",
+        "synthetic": True,
+        "source": "unknown"
+    }
 
 
 # ── Datan luku ─────────────────────────────────────────────────────────────
@@ -223,11 +476,13 @@ def read_file(filepath) -> dict:
             if code is None or str(code).strip() == "":
                 continue
 
+            note = row[12] if len(row) > 12 else None
             person_observations[person_name].append({
                 "hour": h,
                 "minute": m,
                 "code": code,
                 "code_key": normalize_code_key(code),
+                "note": str(note).strip() if note is not None else "",
                 "category": classify_code(code),
             })
 
@@ -306,22 +561,55 @@ def build_person_day_infos(file_datasets: list):
     """
     Henkilöt yhdistetään tiedostojen välillä sarakepaikan perusteella:
       C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
+
+    Lisäksi muodostetaan synteettinen työneräluettelo yhdistelmäkoodeille
+    huomio-tekstin ja Eräluettelon nimien perusteella.
     """
     person_days = defaultdict(list)
     merged_batch_catalog = {}
 
     for ds in file_datasets:
-        date_val = ds["date"]
         for code_key, info in ds.get("batch_catalog", {}).items():
             if code_key not in merged_batch_catalog:
                 merged_batch_catalog[code_key] = info
 
+    catalog_index = build_catalog_match_index(merged_batch_catalog)
+
+    unknown_notes = defaultdict(list)
+    for ds in file_datasets:
+        for observations in ds["persons"].values():
+            for obs in observations:
+                code_key = obs["code_key"]
+                if code_key not in merged_batch_catalog:
+                    unknown_notes[code_key].append(obs.get("note", ""))
+
+    synthetic_catalog = {}
+    for code_key, notes in unknown_notes.items():
+        inferred = infer_combined_code_info(code_key, notes, merged_batch_catalog, catalog_index)
+        if inferred.get("name") or inferred.get("category"):
+            synthetic_catalog[code_key] = inferred
+
+    merged_batch_catalog.update(synthetic_catalog)
+
+    for ds in file_datasets:
+        date_val = ds["date"]
         for person_name, observations in ds["persons"].items():
             if not observations:
                 continue
+
+            resolved_obs = []
+            for obs in observations:
+                code_key = obs["code_key"]
+                info = merged_batch_catalog.get(code_key, {})
+                resolved_category = str(info.get("category", "")).strip() or obs.get("category", "Tuntematon")
+                resolved_obs.append({
+                    **obs,
+                    "category": resolved_category,
+                })
+
             person_days[person_name].append({
                 "date": date_val,
-                "observations": observations,
+                "observations": resolved_obs,
             })
 
     for person_name in person_days:
@@ -833,7 +1121,7 @@ def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode:
 
             st.markdown("**Työneräkohtaiset yhtäjaksoisen tekemisen tilastot**")
             if stats_df.empty:
-                st.info("Eräluettelo-välilehdeltä ei löytynyt nimettyjä tekemisaikaan kuuluvia työneriä, joita olisi havaittu tässä datassa.")
+                st.info("Eräluettelo-välilehdeltä tai yhdistelmäkoodien päätellyistä nimistä ei löytynyt tekemisaikaan kuuluvia työneriä, joita olisi havaittu tässä datassa.")
             else:
                 st.dataframe(stats_df, use_container_width=True, hide_index=True)
 
