@@ -507,15 +507,13 @@ def make_chart2(day_info: list, person_name: str = ""):
 def make_chart3(day_info: list, person_name: str = ""):
     """
     Työneräkaavio:
-    - Jokainen havaintokoodi (= työnerä) saa oman värinsä
+    - Tekemisaika piirretään vaaka-akselin yläpuolelle
+    - Apuaika piirretään vaaka-akselin alapuolelle
+    - Jokainen työnerä / havaintokoodi saa oman värinsä
     - Peräkkäiset saman koodin havainnot yhdistetään yhdeksi jaksoksi
-    - Viivan paksuus kuvaa yhtäjaksoisen jakson kestoa
-    - 1 minuutin havainto piirretään pisteenä
+    - Häiriöaika ja Muu näytetään keskellä symboleina kuten kuvaajassa 1
     """
     from matplotlib.lines import Line2D
-
-    LW_MIN = 2.0
-    LW_MAX = 12.0
 
     def sort_code_key(code):
         try:
@@ -541,111 +539,132 @@ def make_chart3(day_info: list, person_name: str = ""):
             color_map[code] = cmap(i % 20)
         return color_map, unique_codes
 
-    def get_runs(series):
+    def get_code_runs(series):
+        """Ryhmittelee peräkkäiset saman KOODIN havainnot jaksoiksi."""
         if not series:
             return []
 
         runs = []
-        current_code = series[0]["code"]
-        current_cat = series[0]["category"]
-        run_start_x = series[0]["x"]
-        run_len = 1
+        current = series[0]
+        run_start_x = current["x"]
+        prev_x = current["x"]
 
         for obs in series[1:]:
-            if obs["code"] == current_code:
-                run_len += 1
+            if obs["code"] == current["code"]:
+                prev_x = obs["x"]
             else:
-                runs.append((
-                    run_start_x,
-                    run_start_x + run_len - 1,
-                    run_len,
-                    current_cat,
-                    current_code,
-                ))
-                current_code = obs["code"]
-                current_cat = obs["category"]
+                runs.append({
+                    "x0": run_start_x,
+                    "x1": prev_x + 1,
+                    "category": current["category"],
+                    "code": current["code"],
+                })
+                current = obs
                 run_start_x = obs["x"]
-                run_len = 1
+                prev_x = obs["x"]
 
-        runs.append((
-            run_start_x,
-            run_start_x + run_len - 1,
-            run_len,
-            current_cat,
-            current_code,
-        ))
+        runs.append({
+            "x0": run_start_x,
+            "x1": prev_x + 1,
+            "category": current["category"],
+            "code": current["code"],
+        })
         return runs
 
-    def run_linewidth(length: int, max_len: int) -> float:
-        if length <= 1:
-            return LW_MIN
-        if max_len <= 1:
-            return LW_MIN
-        t = math.log(length) / math.log(max_len)
-        return LW_MIN + t * (LW_MAX - LW_MIN)
-
     code_colors, unique_codes = build_code_colors(day_info)
-    all_runs = [run for day in day_info for run in get_runs(day["series"])]
-    max_run_len = max((r[2] for r in all_runs), default=1)
 
-    fig, ax = plt.subplots(figsize=(20, 3.2))
+    fig, ax = plt.subplots(figsize=(20, 4.2))
     fig.patch.set_facecolor("#F5F5F5")
     ax.set_facecolor("#FAFAFA")
 
-    dot_xs = []
-    dot_colors = []
+    first_day = True
+    used_codes = set()
 
     for day in day_info:
-        runs = get_runs(day["series"])
-        for x0, x1, length, _cat, code in runs:
+        runs = get_code_runs(day["series"])
+
+        for run in runs:
+            x0 = run["x0"]
+            width = run["x1"] - run["x0"]
+            cat = run["category"]
+            code = run["code"]
             color = code_colors.get(code, "#888888")
-            if length == 1:
-                dot_xs.append(x0 + 0.5)
-                dot_colors.append(color)
-            else:
-                lw = run_linewidth(length, max_run_len)
-                ax.plot(
-                    [x0, x1 + 1],
-                    [0, 0],
-                    color=color,
-                    linewidth=lw,
-                    solid_capstyle="round",
+            used_codes.add(code)
+
+            if cat in ("Tekemisaika", "Valmiusaika"):
+                ax.broken_barh(
+                    [(x0, width)], (0, 1),
+                    facecolor=color,
+                    edgecolor="white",
+                    linewidth=0.6,
+                    alpha=0.95,
+                    zorder=3,
+                )
+            elif cat in ("Apuaika", "Taukoaika"):
+                ax.broken_barh(
+                    [(x0, width)], (-1, 1),
+                    facecolor=color,
+                    edgecolor="white",
+                    linewidth=0.6,
+                    alpha=0.95,
                     zorder=3,
                 )
 
-    if dot_xs:
-        ax.scatter(
-            dot_xs,
-            [0] * len(dot_xs),
-            color=dot_colors,
-            s=55,
-            zorder=4,
-            linewidths=0.6,
-            edgecolors="white",
-        )
+        hairio = [o for o in day["series"] if o["category"] == "Häiriöaika"]
+        if hairio:
+            ax.scatter(
+                [o["x"] + 0.5 for o in hairio],
+                [0] * len(hairio),
+                marker=(10, 1, 0),
+                s=MARKER_SIZE_HAIRIO,
+                color=[code_colors.get(o["code"], COLORS["Häiriöaika"]) for o in hairio],
+                zorder=6,
+                linewidths=0.5,
+                edgecolors="white",
+                label="Häiriöaika" if first_day else "",
+            )
+            used_codes.update(o["code"] for o in hairio)
+
+        muu = [o for o in day["series"] if o["category"] == "Muu"]
+        if muu:
+            ax.scatter(
+                [o["x"] + 0.5 for o in muu],
+                [0] * len(muu),
+                marker="o",
+                s=MARKER_SIZE_MUU,
+                color=[code_colors.get(o["code"], COLORS["Muu"]) for o in muu],
+                zorder=6,
+                linewidths=0.8,
+                edgecolors="white",
+                label="Muu" if first_day else "",
+            )
+            used_codes.update(o["code"] for o in muu)
+
+        first_day = False
 
     tick_positions, tick_labels, end_tick_positions = get_xticks_for_day_info(day_info)
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
 
-    for lbl, pos in zip(ax.get_xticklabels(), tick_positions):
+    for label, pos in zip(ax.get_xticklabels(), tick_positions):
         if pos in end_tick_positions:
-            lbl.set_color("#C62828")
-            lbl.set_fontweight("bold")
+            label.set_color("#C62828")
+            label.set_fontweight("bold")
         else:
-            lbl.set_color("#333333")
+            label.set_color("#333333")
+            label.set_fontweight("normal")
 
     for day in day_info:
-        x_start = day["x_start"]
-        x_end = day["series"][-1]["x"]
+        end_x = day["series"][-1]["x"]
+        ax.axvline(end_x, color="#C62828", linestyle=":", linewidth=1.2, zorder=4)
+
+    for day in day_info:
         date_label = day["date"].strftime("%d.%m.%Y") if day["date"] else "?"
-
-        ax.axvline(x_start, color="#888888", linestyle="--", linewidth=1.2, zorder=5)
-        ax.axvline(x_end, color="#C62828", linestyle=":", linewidth=1.2, zorder=5)
-
+        x_start = day["x_start"]
+        ax.axvline(x_start, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
         ax.text(
             x_start + 1.0,
-            -0.68,
+            -1.45,
             date_label,
             rotation=90,
             rotation_mode="anchor",
@@ -654,7 +673,7 @@ def make_chart3(day_info: list, person_name: str = ""):
             fontsize=9,
             fontweight="bold",
             color="#444444",
-            zorder=6,
+            zorder=5,
         )
 
     if len(day_info) > 1:
@@ -662,33 +681,34 @@ def make_chart3(day_info: list, person_name: str = ""):
             gap_x = (day_info[i]["x_end"] + day_info[i + 1]["x_start"]) / 2
             ax.axvline(gap_x, color="#BBBBBB", linestyle="--", linewidth=1.0, zorder=2)
 
-    ax.axhline(0, color="#DDDDDD", linewidth=0.8, zorder=1)
-    ax.set_ylim(-0.85, 0.85)
-    ax.set_yticks([])
+    ax.axhline(0, color="#333333", linewidth=1.2, zorder=3)
+    ax.set_ylim(-1.6, 2.0)
+    ax.set_yticks([-0.5, 0.5])
+    ax.set_yticklabels(["Apuaika", "Tekemisaika"], fontsize=9)
+    ax.tick_params(axis="y", length=0)
     ax.set_xlabel("Kellonaika", fontsize=9)
 
-    for spine in ["top", "right", "left"]:
+    for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
+    ax.spines["left"].set_color("#CCCCCC")
     ax.spines["bottom"].set_color("#CCCCCC")
     ax.grid(axis="x", color="#E0E0E0", linestyle="-", linewidth=0.5, zorder=0)
 
-    legend_handles = []
-    for code in unique_codes:
-        legend_handles.append(
-            Line2D([0], [0], color=code_colors[code], linewidth=5, label=f"Työnerä {code}")
-        )
-
-    legend_handles.extend([
-        Line2D([0], [0], color="#777777",
-               linewidth=run_linewidth(2, max_run_len),
-               label="Lyhyt yhtäjaksoinen työ"),
-        Line2D([0], [0], color="#777777",
-               linewidth=run_linewidth(max_run_len, max_run_len),
-               label="Pitkä yhtäjaksoinen työ"),
-        Line2D([0], [0], marker="o", color="w",
-               markerfacecolor="#777777", markersize=7,
-               label="Yksittäinen havainto"),
-    ])
+    code_handles = [
+        mpatches.Patch(color=code_colors[code], label=f"Työnerä {code}")
+        for code in unique_codes if code in used_codes
+    ]
+    meta_handles = [
+        plt.Line2D([0], [0], marker=(10, 1, 0), color="w",
+                   markerfacecolor=COLORS["Häiriöaika"], markersize=14, label="Häiriöaika"),
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=COLORS["Muu"], markersize=12, label="Muu"),
+        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5,
+                   label="Mittauksen aloitus"),
+        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5,
+                   label="Mittauksen päättyminen"),
+    ]
+    legend_handles = code_handles + meta_handles
 
     ax.legend(
         handles=legend_handles,
@@ -696,13 +716,10 @@ def make_chart3(day_info: list, person_name: str = ""):
         bbox_to_anchor=(0.5, -0.22),
         framealpha=0.95,
         fontsize=8,
-        ncol=min(6, max(3, len(legend_handles) // 2)),
+        ncol=min(6, max(3, (len(legend_handles) + 1) // 2)),
     )
 
-    title = (
-        "Työneräkaavio – jokainen työnerä omalla värillään, "
-        "viivan paksuus kuvaa yhtäjaksoisen jakson kestoa"
-    )
+    title = "Työneräkaavio – työnerät väreillä, tekemisaika ylhäällä ja apuaika alhaalla"
     if person_name:
         title += f" ({person_name})"
     ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
