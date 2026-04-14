@@ -416,38 +416,51 @@ def get_code_runs(series):
 def compute_batch_run_statistics(day_info: list, batch_catalog: dict) -> pd.DataFrame:
     """
     Laskee työneräkohtaiset yhtäjaksoisten jaksojen pituustilastot.
-    Mukaan otetaan vain sellaiset erät, joilla on nimi Eräluettelo-välilehdellä.
+
+    Mukaan otetaan vain:
+    - sellaiset erät, joilla on nimi Eräluettelo-välilehdellä
+    - tekemisaikaan kuuluvat jaksot
+    - taulukko järjestetään keskiarvon mukaan laskevaan järjestykseen
     """
     lengths_by_code = defaultdict(list)
-    category_by_code = {}
 
     for day in day_info:
         for run in get_code_runs(day["series"]):
             code_key = run["code_key"]
             if code_key not in batch_catalog:
                 continue
+            if run["category"] != "Tekemisaika":
+                continue
             lengths_by_code[code_key].append(run["length"])
-            category_by_code[code_key] = run["category"]
 
     rows = []
-    for code_key in sorted(lengths_by_code.keys(), key=sort_code_key):
+    for code_key in lengths_by_code.keys():
         lengths = lengths_by_code[code_key]
         if not lengths:
             continue
 
         info = batch_catalog.get(code_key, {})
+        mean_val = sum(lengths) / len(lengths)
         rows.append({
             "Eränro": str(code_key).replace(".0", ""),
             "Erän nimi": info.get("name", ""),
-            "Aikalaji": category_by_code.get(code_key, info.get("category", "")),
             "Jaksoja (n)": len(lengths),
             "Min (min)": int(min(lengths)),
             "Max (min)": int(max(lengths)),
-            "Keskiarvo (min)": round(sum(lengths) / len(lengths), 2),
+            "Keskiarvo (min)": round(mean_val, 2),
             "Keskihajonta": round(pd.Series(lengths).std(ddof=1), 2) if len(lengths) > 1 else 0.0,
         })
 
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=[
+            "Eränro", "Erän nimi", "Jaksoja (n)", "Min (min)",
+            "Max (min)", "Keskiarvo (min)", "Keskihajonta"
+        ])
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(by=["Keskiarvo (min)", "Max (min)", "Eränro"], ascending=[False, False, True])
+    df = df.reset_index(drop=True)
+    return df
 
 
 # ── Kuvaajien piirto ───────────────────────────────────────────────────────
@@ -698,7 +711,7 @@ def make_chart3(day_info: list, batch_catalog: dict, person_name: str = ""):
     ax.axhline(0, color="#333333", linewidth=1.2, zorder=3)
     ax.set_ylim(-1.6, 2.0)
     ax.set_yticks([-0.5, 0.5])
-    ax.set_yticklabels(["Muu aika", "Tekemisaika"], fontsize=9)
+    ax.set_yticklabels(["Apuaika, häiriöaika ja muu aika", "Tekemisaika"], fontsize=9)
     ax.tick_params(axis="y", length=0)
     ax.set_xlabel("Kellonaika", fontsize=9)
 
