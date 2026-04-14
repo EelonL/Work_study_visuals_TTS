@@ -711,8 +711,7 @@ def format_batch_label(code_key, batch_catalog):
 
 def build_chart3_legend_df(day_info: list, batch_catalog: dict) -> pd.DataFrame:
     """
-    Rakentaa työneräkaavion selitteen omaksi taulukokseen,
-    jotta varsinainen kuvaaja ei täyty legendasta.
+    Rakentaa työneräkaavion selitteen datamuotoon.
     """
     used_codes = set()
 
@@ -740,6 +739,66 @@ def build_chart3_legend_df(day_info: list, batch_catalog: dict) -> pd.DataFrame:
     ])
 
     return pd.DataFrame(rows)
+
+
+def make_chart3_legend_figure(day_info: list, batch_catalog: dict):
+    """
+    Piirtää työneräkaavion selitteen omana erillisenä kuvanaan,
+    jotta värikytkentä säilyy mutta varsinainen kuvaaja pysyy puhtaana.
+    """
+    used_codes = set()
+    for day in day_info:
+        for run in get_code_runs(day["series"]):
+            if run["category"] in ("Tekemisaika", "Apuaika", "Valmiusaika") and run["code_key"] in batch_catalog:
+                used_codes.add(run["code_key"])
+
+    unique_codes = sorted(used_codes, key=sort_code_key)
+    cmap = plt.get_cmap("tab20")
+    code_colors = {code_key: cmap(i % 20) for i, code_key in enumerate(unique_codes)}
+
+    legend_items = []
+    for code_key in unique_codes:
+        legend_items.append(("patch", code_colors[code_key], format_batch_label(code_key, batch_catalog)))
+
+    legend_items.extend([
+        ("patch", COLORS["Häiriöaika"], "Häiriöaika"),
+        ("patch", COLORS["Muu"], "Muu"),
+        ("patch", COLORS["Taukoaika"], "Taukoaika"),
+        ("patch", COLORS["Tuntematon"], "Tuntematon / nimeämätön erä"),
+        ("line_start", "#888888", "Mittauksen aloitus"),
+        ("line_end", "#C62828", "Mittauksen päättyminen"),
+    ])
+
+    n_items = max(1, len(legend_items))
+    ncols = 2 if n_items <= 12 else 3
+    nrows = (n_items + ncols - 1) // ncols
+
+    fig_h = max(1.6, 0.52 * nrows + 0.55)
+    fig, ax = plt.subplots(figsize=(22, fig_h))
+    fig.patch.set_facecolor("#F5F5F5")
+    ax.set_facecolor("#FAFAFA")
+    ax.set_xlim(0, ncols)
+    ax.set_ylim(0, nrows)
+    ax.axis("off")
+
+    for i, (kind, color, label) in enumerate(legend_items):
+        col = i // nrows
+        row = i % nrows
+        y = nrows - row - 0.55
+        x = col + 0.06
+
+        if kind == "patch":
+            rect = mpatches.Rectangle((x, y - 0.10), 0.10, 0.20, facecolor=color, edgecolor="#FFFFFF", linewidth=0.8)
+            ax.add_patch(rect)
+        elif kind == "line_start":
+            ax.plot([x, x + 0.12], [y, y], color=color, linestyle="--", linewidth=2.0, solid_capstyle="butt")
+        elif kind == "line_end":
+            ax.plot([x, x + 0.12], [y, y], color=color, linestyle=":", linewidth=2.2, solid_capstyle="butt")
+
+        ax.text(x + 0.15, y, label, va="center", ha="left", fontsize=8.5, color="#222222")
+
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.96, bottom=0.08)
+    return fig
 
 def get_code_runs(series):
     if not series:
@@ -1255,9 +1314,10 @@ def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode:
             st.subheader("Kuvaaja 1b – Työneräkaavio")
             st.pyplot(fig3)
 
-            legend_df = build_chart3_legend_df(day_info, batch_catalog)
             with st.expander("Näytä työneräkaavion selitteet", expanded=False):
-                st.dataframe(legend_df, use_container_width=True, hide_index=True)
+                legend_fig = make_chart3_legend_figure(day_info, batch_catalog)
+                st.pyplot(legend_fig)
+                plt.close(legend_fig)
 
             st.markdown("**Työneräkohtaiset yhtäjaksoisen tekemisen tilastot**")
             if stats_df.empty:
