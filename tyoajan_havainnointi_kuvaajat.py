@@ -258,16 +258,48 @@ def make_chart1(day_info: list):
 
         first_day = False
 
-    # X-akselin kellonajat (tunnin välein)
+    # X-akselin kellonajat (tunnin välein + päivän päättymisaika)
     tick_positions, tick_labels = [], []
+    end_tick_positions = set()  # pidetään kirjaa loppuajoista, ettei tule päällekkäisyyttä
+
     for day in day_info:
         duration = day["x_end"] - day["x_start"]
         for offset in range(0, int(duration) + 1, 60):
             tick_positions.append(day["x_start"] + offset)
             tick_labels.append(minutes_to_label(day["start_abs"] + offset))
 
+        # Päivän viimeinen havaintoaika
+        last_series = day["series"][-1]
+        end_abs = last_series["abs_min"]
+        end_x = last_series["x"]
+        # Lisätään vain jos ei ole jo tunnin merkki samassa kohdassa
+        if end_x not in tick_positions:
+            tick_positions.append(end_x)
+            tick_labels.append(minutes_to_label(end_abs))
+            end_tick_positions.add(end_x)
+
+    # Lajitellaan tick-merkit x-järjestykseen
+    ticks_sorted = sorted(zip(tick_positions, tick_labels), key=lambda t: t[0])
+    tick_positions, tick_labels = zip(*ticks_sorted)
+
     ax.set_xticks(tick_positions)
+
+    # Päivän loppuajat korostetaan: lihavoitu teksti ja eri väri
+    tick_colors = ["#C62828" if pos in end_tick_positions else "#333333"
+                   for pos in tick_positions]
+    tick_weights = ["bold" if pos in end_tick_positions else "normal"
+                    for pos in tick_positions]
+
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
+    for label, color, weight in zip(ax.get_xticklabels(), tick_colors, tick_weights):
+        label.set_color(color)
+        label.set_fontweight(weight)
+
+    # Pystyviiva päivän loppukohtaan
+    for day in day_info:
+        end_x = day["series"][-1]["x"]
+        end_abs = day["series"][-1]["abs_min"]
+        ax.axvline(end_x, color="#C62828", linestyle=":", linewidth=1.2, zorder=4)
 
     # Katkoviiva + päivämääräteksti jokaisen päivän aloituskohdassa
     for day in day_info:
@@ -319,9 +351,13 @@ def make_chart1(day_info: list):
                    markerfacecolor=COLORS["Häiriöaika"], markersize=14, label="Häiriöaika"),
         plt.Line2D([0], [0], marker="o", color="w",
                    markerfacecolor=COLORS["Muu"], markersize=12, label="Muu"),
+        plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5,
+                   label="Mittauksen aloitus"),
+        plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5,
+                   label="Mittauksen päättyminen"),
     ]
     ax.legend(handles=legend_handles, loc="lower right",
-              framealpha=0.9, fontsize=8, ncol=3)
+              framealpha=0.9, fontsize=8, ncol=4)
     ax.set_title("Aikalajit ajan suhteen – minuuttihavainnot",
                  fontsize=13, fontweight="bold", pad=30)
     ax.set_xlabel("Kellonaika", fontsize=9)
