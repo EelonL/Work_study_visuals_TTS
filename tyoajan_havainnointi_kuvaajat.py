@@ -6,10 +6,9 @@ Lukee yhden tai useamman Excel-tiedoston "Havainnot"-välilehdeltä
 ja piirtää jokaiselle henkilölle omat kuvaajat:
 
   1. Aikajanakaavio  – Tekemisaika yläpuolella, Apuaika alapuolella,
-                       Häiriöaika räjähdyssymbolilla, Muu ympyräsymbolilla.
-  2. Työneräkaavio   – Jokainen työnerä / havaintokoodi omalla värillään.
-                       Peräkkäinen sama työnerä yhdistyy yhdeksi jaksoksi,
-                       ja viivan paksuus kuvaa jakson kestoa.
+                       Häiriöaika ja muu aika omilla väreillään.
+  2. Työneräkaavio   – Tekemisaika yläpuolella, muut ajat alapuolella.
+                       Työnerät esitetään omilla väreillään palkkeina.
   3. Yhteenvetokuvaaja – Aikalajien prosenttiosuudet päivittäin.
 
 Käyttö:
@@ -25,6 +24,7 @@ Vaatimukset (requirements.txt):
 import math
 import sys
 from collections import defaultdict
+import re
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -93,7 +93,14 @@ def classify_code(code) -> str:
 def _normalize_person_name(value, index: int) -> str:
     if value is None or str(value).strip() == "":
         return f"Henkilö {index}"
-    return str(value).strip()
+    return " ".join(str(value).strip().split())
+
+
+def canonical_person_key(name: str) -> str:
+    """Yhdistää saman henkilön nimet, vaikka otsikoissa olisi pieniä eroja."""
+    cleaned = " ".join(str(name).strip().split()).casefold()
+    cleaned = re.sub(r"[^\wåäöÅÄÖ]+", "", cleaned, flags=re.UNICODE)
+    return cleaned
 
 
 def read_file(filepath) -> dict:
@@ -245,6 +252,9 @@ def build_person_day_infos(file_datasets: list) -> dict:
     """
     Rakentaa kaikista tiedostoista henkilökohtaiset day_info-rakenteet.
 
+    Saman henkilön havainnot yhdistetään, vaikka nimi olisi eri tiedostoissa
+    hieman eri muodossa (esim. ylimääräisiä välilyöntejä tai eri kirjainkoko).
+
     Palauttaa:
       {
         "Henkilö A": [day_info, day_info, ...],
@@ -252,22 +262,32 @@ def build_person_day_infos(file_datasets: list) -> dict:
       }
     """
     person_days = defaultdict(list)
+    display_names = {}
 
     for ds in file_datasets:
         date_val = ds["date"]
         for person_name, observations in ds["persons"].items():
-            if observations:
-                person_days[person_name].append({
-                    "date": date_val,
-                    "observations": observations,
-                })
+            if not observations:
+                continue
 
-    for person_name in person_days:
-        person_days[person_name].sort(key=lambda d: d["date"] or datetime.min.date())
+            person_key = canonical_person_key(person_name)
+            if not person_key:
+                person_key = person_name
+
+            if person_key not in display_names:
+                display_names[person_key] = person_name
+
+            person_days[person_key].append({
+                "date": date_val,
+                "observations": observations,
+            })
+
+    for person_key in person_days:
+        person_days[person_key].sort(key=lambda d: d["date"] or datetime.min.date())
 
     return {
-        person_name: build_day_info(day_datasets)
-        for person_name, day_datasets in person_days.items()
+        display_names[person_key]: build_day_info(day_datasets)
+        for person_key, day_datasets in person_days.items()
     }
 
 
@@ -507,13 +527,11 @@ def make_chart2(day_info: list, person_name: str = ""):
 def make_chart3(day_info: list, person_name: str = ""):
     """
     Työneräkaavio:
-    - Tekemisaika piirretään vaaka-akselin yläpuolelle
-    - Apuaika piirretään vaaka-akselin alapuolelle
-    - Jokainen työnerä / havaintokoodi saa oman värinsä
+    - Tekemisaika ja valmiusaika piirretään vaaka-akselin yläpuolelle
+    - Apuaika piirretään vaaka-akselin alapuolelle työnerän värillä
+    - Häiriöaika, muu ja taukoaika piirretään myös alapuolelle kiinteillä väreillä
     - Peräkkäiset saman koodin havainnot yhdistetään yhdeksi jaksoksi
-    - Häiriöaika ja Muu näytetään keskellä symboleina kuten kuvaajassa 1
     """
-    from matplotlib.lines import Line2D
 
     def sort_code_key(code):
         try:
@@ -527,6 +545,8 @@ def make_chart3(day_info: list, person_name: str = ""):
 
         for day in day_info_local:
             for obs in day["series"]:
+                if obs["category"] not in ("Tekemisaika", "Apuaika", "Valmiusaika"):
+                    continue
                 code = obs["code"]
                 if code not in seen:
                     seen.add(code)
@@ -540,7 +560,6 @@ def make_chart3(day_info: list, person_name: str = ""):
         return color_map, unique_codes
 
     def get_code_runs(series):
-        """Ryhmittelee peräkkäiset saman KOODIN havainnot jaksoiksi."""
         if not series:
             return []
 
@@ -577,7 +596,6 @@ def make_chart3(day_info: list, person_name: str = ""):
     fig.patch.set_facecolor("#F5F5F5")
     ax.set_facecolor("#FAFAFA")
 
-    first_day = True
     used_codes = set()
 
     for day in day_info:
@@ -588,10 +606,10 @@ def make_chart3(day_info: list, person_name: str = ""):
             width = run["x1"] - run["x0"]
             cat = run["category"]
             code = run["code"]
-            color = code_colors.get(code, "#888888")
-            used_codes.add(code)
 
             if cat in ("Tekemisaika", "Valmiusaika"):
+                color = code_colors.get(code, COLORS["Tekemisaika"])
+                used_codes.add(code)
                 ax.broken_barh(
                     [(x0, width)], (0, 1),
                     facecolor=color,
@@ -600,7 +618,9 @@ def make_chart3(day_info: list, person_name: str = ""):
                     alpha=0.95,
                     zorder=3,
                 )
-            elif cat in ("Apuaika", "Taukoaika"):
+            elif cat == "Apuaika":
+                color = code_colors.get(code, COLORS["Apuaika"])
+                used_codes.add(code)
                 ax.broken_barh(
                     [(x0, width)], (-1, 1),
                     facecolor=color,
@@ -609,38 +629,15 @@ def make_chart3(day_info: list, person_name: str = ""):
                     alpha=0.95,
                     zorder=3,
                 )
-
-        hairio = [o for o in day["series"] if o["category"] == "Häiriöaika"]
-        if hairio:
-            ax.scatter(
-                [o["x"] + 0.5 for o in hairio],
-                [0] * len(hairio),
-                marker=(10, 1, 0),
-                s=MARKER_SIZE_HAIRIO,
-                color=[code_colors.get(o["code"], COLORS["Häiriöaika"]) for o in hairio],
-                zorder=6,
-                linewidths=0.5,
-                edgecolors="white",
-                label="Häiriöaika" if first_day else "",
-            )
-            used_codes.update(o["code"] for o in hairio)
-
-        muu = [o for o in day["series"] if o["category"] == "Muu"]
-        if muu:
-            ax.scatter(
-                [o["x"] + 0.5 for o in muu],
-                [0] * len(muu),
-                marker="o",
-                s=MARKER_SIZE_MUU,
-                color=[code_colors.get(o["code"], COLORS["Muu"]) for o in muu],
-                zorder=6,
-                linewidths=0.8,
-                edgecolors="white",
-                label="Muu" if first_day else "",
-            )
-            used_codes.update(o["code"] for o in muu)
-
-        first_day = False
+            elif cat in ("Häiriöaika", "Muu", "Taukoaika", "Tuntematon"):
+                ax.broken_barh(
+                    [(x0, width)], (-1, 1),
+                    facecolor=COLORS.get(cat, COLORS["Tuntematon"]),
+                    edgecolor="white",
+                    linewidth=0.6,
+                    alpha=0.95,
+                    zorder=3,
+                )
 
     tick_positions, tick_labels, end_tick_positions = get_xticks_for_day_info(day_info)
     ax.set_xticks(tick_positions)
@@ -684,7 +681,7 @@ def make_chart3(day_info: list, person_name: str = ""):
     ax.axhline(0, color="#333333", linewidth=1.2, zorder=3)
     ax.set_ylim(-1.6, 2.0)
     ax.set_yticks([-0.5, 0.5])
-    ax.set_yticklabels(["Apuaika", "Tekemisaika"], fontsize=9)
+    ax.set_yticklabels(["Muu aika", "Tekemisaika"], fontsize=9)
     ax.tick_params(axis="y", length=0)
     ax.set_xlabel("Kellonaika", fontsize=9)
 
@@ -698,17 +695,17 @@ def make_chart3(day_info: list, person_name: str = ""):
         mpatches.Patch(color=code_colors[code], label=f"Työnerä {code}")
         for code in unique_codes if code in used_codes
     ]
-    meta_handles = [
-        plt.Line2D([0], [0], marker=(10, 1, 0), color="w",
-                   markerfacecolor=COLORS["Häiriöaika"], markersize=14, label="Häiriöaika"),
-        plt.Line2D([0], [0], marker="o", color="w",
-                   markerfacecolor=COLORS["Muu"], markersize=12, label="Muu"),
+    fixed_handles = [
+        mpatches.Patch(color=COLORS["Häiriöaika"], label="Häiriöaika"),
+        mpatches.Patch(color=COLORS["Muu"], label="Muu"),
+        mpatches.Patch(color=COLORS["Taukoaika"], label="Taukoaika"),
+        mpatches.Patch(color=COLORS["Tuntematon"], label="Tuntematon"),
         plt.Line2D([0], [0], color="#888888", linestyle="--", linewidth=1.5,
                    label="Mittauksen aloitus"),
         plt.Line2D([0], [0], color="#C62828", linestyle=":", linewidth=1.5,
                    label="Mittauksen päättyminen"),
     ]
-    legend_handles = code_handles + meta_handles
+    legend_handles = code_handles + fixed_handles
 
     ax.legend(
         handles=legend_handles,
@@ -719,14 +716,13 @@ def make_chart3(day_info: list, person_name: str = ""):
         ncol=min(6, max(3, (len(legend_handles) + 1) // 2)),
     )
 
-    title = "Työneräkaavio – työnerät väreillä, tekemisaika ylhäällä ja apuaika alhaalla"
+    title = "Työneräkaavio – työnerät väreillä, muut ajat alapuolella"
     if person_name:
         title += f" ({person_name})"
     ax.set_title(title, fontsize=12, fontweight="bold", pad=20)
 
     plt.tight_layout()
     return fig
-
 
 # ── Käyttöliittymät ────────────────────────────────────────────────────────
 
