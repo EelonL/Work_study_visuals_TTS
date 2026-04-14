@@ -24,7 +24,6 @@ Vaatimukset (requirements.txt):
 import math
 import sys
 from collections import defaultdict
-import re
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -91,16 +90,10 @@ def classify_code(code) -> str:
 # ── Datan luku ─────────────────────────────────────────────────────────────
 
 def _normalize_person_name(value, index: int) -> str:
+    """Palauttaa henkilölle näytettävän nimen, mutta ei vaikuta yhdistämiseen tiedostojen välillä."""
     if value is None or str(value).strip() == "":
         return f"Henkilö {index}"
     return " ".join(str(value).strip().split())
-
-
-def canonical_person_key(name: str) -> str:
-    """Yhdistää saman henkilön nimet, vaikka otsikoissa olisi pieniä eroja."""
-    cleaned = " ".join(str(name).strip().split()).casefold()
-    cleaned = re.sub(r"[^\wåäöÅÄÖ]+", "", cleaned, flags=re.UNICODE)
-    return cleaned
 
 
 def read_file(filepath) -> dict:
@@ -145,8 +138,9 @@ def read_file(filepath) -> dict:
     person_columns = []
     for col_idx in range(2, max_cols):
         header_val = header_row[col_idx] if col_idx < len(header_row) else None
-        person_name = _normalize_person_name(header_val, col_idx - 1)
-        person_columns.append((col_idx, person_name))
+        display_name = _normalize_person_name(header_val, col_idx - 1)
+        fixed_person_id = f"Henkilö {col_idx - 1}"
+        person_columns.append((col_idx, fixed_person_id, display_name))
 
     person_observations = defaultdict(list)
 
@@ -161,7 +155,7 @@ def read_file(filepath) -> dict:
         except (TypeError, ValueError):
             continue
 
-        for col_idx, person_name in person_columns:
+        for col_idx, person_name, display_name in person_columns:
             code = row[col_idx] if col_idx < len(row) else None
             if code is None or str(code).strip() == "":
                 continue
@@ -171,6 +165,7 @@ def read_file(filepath) -> dict:
                 "minute": m,
                 "code": code,
                 "category": classify_code(code),
+                "display_name": display_name,
             })
 
     wb.close()
@@ -252,17 +247,24 @@ def build_person_day_infos(file_datasets: list) -> dict:
     """
     Rakentaa kaikista tiedostoista henkilökohtaiset day_info-rakenteet.
 
-    Saman henkilön havainnot yhdistetään, vaikka nimi olisi eri tiedostoissa
-    hieman eri muodossa (esim. ylimääräisiä välilyöntejä tai eri kirjainkoko).
+    Henkilöt yhdistetään tiedostojen välillä SARAKKEEN PAIKAN perusteella,
+    ei nimen perusteella:
+      - sarake C = Henkilö 1
+      - sarake D = Henkilö 2
+      - sarake E = Henkilö 3
+      - sarake F = Henkilö 4
+      ...
+
+    Näin esimerkiksi "Henkilö 1" on aina sama henkilö kaikissa Excel-tiedostoissa,
+    vaikka otsikkoteksti vaihtelisi tai puuttuisi.
 
     Palauttaa:
       {
-        "Henkilö A": [day_info, day_info, ...],
-        "Henkilö B": [...],
+        "Henkilö 1": [day_info, day_info, ...],
+        "Henkilö 2": [...],
       }
     """
     person_days = defaultdict(list)
-    display_names = {}
 
     for ds in file_datasets:
         date_val = ds["date"]
@@ -270,24 +272,17 @@ def build_person_day_infos(file_datasets: list) -> dict:
             if not observations:
                 continue
 
-            person_key = canonical_person_key(person_name)
-            if not person_key:
-                person_key = person_name
-
-            if person_key not in display_names:
-                display_names[person_key] = person_name
-
-            person_days[person_key].append({
+            person_days[person_name].append({
                 "date": date_val,
                 "observations": observations,
             })
 
-    for person_key in person_days:
-        person_days[person_key].sort(key=lambda d: d["date"] or datetime.min.date())
+    for person_name in person_days:
+        person_days[person_name].sort(key=lambda d: d["date"] or datetime.min.date())
 
     return {
-        display_names[person_key]: build_day_info(day_datasets)
-        for person_key, day_datasets in person_days.items()
+        person_name: build_day_info(day_datasets)
+        for person_name, day_datasets in person_days.items()
     }
 
 
@@ -761,7 +756,7 @@ def run_streamlit():
     st.set_page_config(page_title="Työajan havainnointi", layout="wide")
     st.title("Työajan havainnointi – Kuvaajageneraattori")
     st.write("Lataa yksi tai useampi havainnointi-Excel-tiedosto (.xlsx tai .xlsm).")
-    st.write("Jos tiedostossa on useita henkilöitä, jokaiselle henkilölle muodostetaan omat kuvaajat.")
+    st.write("Jos tiedostossa on useita henkilöitä, jokaiselle henkilösarakkeelle muodostetaan omat kuvaajat. Henkilö 1, 2, 3 jne. oletetaan samoiksi henkilöiksi kaikissa tiedostoissa.")
 
     uploaded = st.file_uploader(
         "Valitse Excel-tiedosto(t)",
