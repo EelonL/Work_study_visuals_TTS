@@ -132,14 +132,16 @@ def read_file(filepath) -> dict:
         return {"date": meas_date, "persons": {}}
 
     header_row = rows[4]  # oletus: otsikot rivillä 5
-    max_cols = max(len(r) for r in rows) if rows else 0
 
-    # Sarakkeet: A=tunti, B=minuutti, C=Henkilö1, D=Henkilö2, ...
+    # Tässä lomakepohjassa varsinaiset henkilösarakkeet ovat aina:
+    #   C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
+    # Myöhemmissä sarakkeissa voi olla esimerkiksi nollia, huomiosarake tai muuta metadataa,
+    # eikä niitä saa tulkita henkilöiksi. Tämä oli syy virheelliseen "Henkilö 11" -tapaukseen.
     person_columns = []
-    for col_idx in range(2, max_cols):
+    for col_idx in range(2, 6):
         header_val = header_row[col_idx] if col_idx < len(header_row) else None
-        display_name = _normalize_person_name(header_val, col_idx - 1)
         fixed_person_id = f"Henkilö {col_idx - 1}"
+        display_name = _normalize_person_name(header_val, col_idx - 1)
         person_columns.append((col_idx, fixed_person_id, display_name))
 
     person_observations = defaultdict(list)
@@ -756,7 +758,8 @@ def run_streamlit():
     st.set_page_config(page_title="Työajan havainnointi", layout="wide")
     st.title("Työajan havainnointi – Kuvaajageneraattori")
     st.write("Lataa yksi tai useampi havainnointi-Excel-tiedosto (.xlsx tai .xlsm).")
-    st.write("Jos tiedostossa on useita henkilöitä, jokaiselle henkilösarakkeelle muodostetaan omat kuvaajat. Henkilö 1, 2, 3 jne. oletetaan samoiksi henkilöiksi kaikissa tiedostoissa.")
+    st.write("Jos tiedostossa on useita henkilöitä, jokaiselle henkilösarakkeelle muodostetaan omat kuvaajat.")
+    st.write("Tulkinta on kiinteä: C = Henkilö 1, D = Henkilö 2, E = Henkilö 3 ja F = Henkilö 4 kaikissa tiedostoissa.")
 
     uploaded = st.file_uploader(
         "Valitse Excel-tiedosto(t)",
