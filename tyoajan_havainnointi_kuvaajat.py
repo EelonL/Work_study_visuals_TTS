@@ -557,15 +557,14 @@ def build_day_info(datasets: list) -> list:
     return day_info
 
 
-def build_person_day_infos(file_datasets: list):
+def collect_combined_code_candidates(file_datasets: list):
     """
-    Henkilöt yhdistetään tiedostojen välillä sarakepaikan perusteella:
-      C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
-
-    Lisäksi muodostetaan synteettinen työneräluettelo yhdistelmäkoodeille
-    huomio-tekstin ja Eräluettelon nimien perusteella.
+    Kerää yhdistelmäkoodiehdokkaat ja ohjelman alustavat arviot ennen laskentaa.
+    Palauttaa:
+      - merged_batch_catalog: Eräluetteloista yhdistetty perusluettelo
+      - candidates: lista ehdokasrivejä käyttöliittymää varten
+      - auto_catalog: ohjelman automaattiset tulkinnat yhdistelmäkoodeille
     """
-    person_days = defaultdict(list)
     merged_batch_catalog = {}
 
     for ds in file_datasets:
@@ -583,13 +582,58 @@ def build_person_day_infos(file_datasets: list):
                 if code_key not in merged_batch_catalog:
                     unknown_notes[code_key].append(obs.get("note", ""))
 
-    synthetic_catalog = {}
-    for code_key, notes in unknown_notes.items():
+    candidates = []
+    auto_catalog = {}
+    for code_key in sorted(unknown_notes.keys(), key=sort_code_key):
+        notes = [str(n).strip() for n in unknown_notes[code_key] if str(n or "").strip()]
         inferred = infer_combined_code_info(code_key, notes, merged_batch_catalog, catalog_index)
-        if inferred.get("name") or inferred.get("category"):
-            synthetic_catalog[code_key] = inferred
+        auto_catalog[code_key] = inferred
 
-    merged_batch_catalog.update(synthetic_catalog)
+        note_counter = Counter(notes)
+        example_note = note_counter.most_common(1)[0][0] if note_counter else ""
+        source = inferred.get("source", "")
+        source_label_map = {
+            "digit_segmentation": "Numeropilkonta + Eräluettelo",
+            "note_match": "Huomio-teksti + Eräluettelo",
+            "note_fallback": "Huomio-teksti",
+            "unknown": "Ei varmaa tulkintaa",
+        }
+
+        candidates.append({
+            "code_key": code_key,
+            "code_text": str(code_key).replace(".0", ""),
+            "suggested_name": str(inferred.get("name", "")).strip(),
+            "suggested_category": str(inferred.get("category", "Tuntematon")).strip() or "Tuntematon",
+            "source": source,
+            "source_label": source_label_map.get(source, source or "Arvio"),
+            "example_note": example_note,
+            "note_count": len(notes),
+        })
+
+    return merged_batch_catalog, candidates, auto_catalog
+
+
+def build_person_day_infos(file_datasets: list, catalog_overrides: dict | None = None):
+    """
+    Henkilöt yhdistetään tiedostojen välillä sarakepaikan perusteella:
+      C = Henkilö 1, D = Henkilö 2, E = Henkilö 3, F = Henkilö 4
+
+    Lisäksi yhdistelmäkoodeille käytetään joko:
+    - käyttäjän vahvistamia tulkintoja, tai
+    - ohjelman automaattisia arvioita.
+    """
+    person_days = defaultdict(list)
+
+    merged_batch_catalog, _, auto_catalog = collect_combined_code_candidates(file_datasets)
+    effective_catalog = dict(merged_batch_catalog)
+    effective_catalog.update(auto_catalog)
+
+    if catalog_overrides:
+        for code_key, info in catalog_overrides.items():
+            effective_catalog[code_key] = {
+                **effective_catalog.get(code_key, {}),
+                **info,
+            }
 
     for ds in file_datasets:
         date_val = ds["date"]
@@ -600,7 +644,7 @@ def build_person_day_infos(file_datasets: list):
             resolved_obs = []
             for obs in observations:
                 code_key = obs["code_key"]
-                info = merged_batch_catalog.get(code_key, {})
+                info = effective_catalog.get(code_key, {})
                 resolved_category = str(info.get("category", "")).strip() or obs.get("category", "Tuntematon")
                 resolved_obs.append({
                     **obs,
@@ -619,7 +663,7 @@ def build_person_day_infos(file_datasets: list):
         person_name: build_day_info(day_datasets)
         for person_name, day_datasets in person_days.items()
     }
-    return person_day_infos, merged_batch_catalog
+    return person_day_infos, effective_catalog
 
 
 def get_xticks_for_day_info(day_info: list):
@@ -1104,6 +1148,84 @@ def build_person_zip(person_name: str, fig1, fig3, fig2, stats_df: pd.DataFrame)
     buffer.seek(0)
     return buffer.getvalue()
 
+
+def render_combined_code_confirmation(candidates: list):
+    """
+    Näyttää yhdistelmäkoodien vahvistusosion ja palauttaa
+    (approved: bool, overrides: dict).
+    """
+    if not candidates:
+        st.success("Yhdistelmäkoodeja ei löytynyt. Kuvaajat voidaan muodostaa suoraan.")
+        return True, {}
+
+    st.subheader("Vahvista yhdistelmäkoodit ennen laskentaa")
+    st.write("Ohjelma tunnisti koodeja, joita ei löytynyt suoraan Eräluettelosta. Tarkista ehdotukset ennen kuvaajien muodostamista.")
+
+    category_options = [
+        "Tekemisaika", "Apuaika", "Valmiusaika",
+        "Häiriöaika", "Muu", "Taukoaika", "Tuntematon"
+    ]
+
+    overrides = {}
+    with st.form("combined_code_confirmation_form"):
+        for cand in candidates:
+            code_text = cand["code_text"]
+            st.markdown(f"### Koodi {code_text}")
+            c1, c2 = st.columns([1, 1])
+
+            with c1:
+                st.text_input(
+                    "Ohjelman arvio",
+                    value=cand["suggested_name"] or "",
+                    disabled=True,
+                    key=f"suggested_name_{code_text}",
+                )
+                st.text_input(
+                    "Arvion perusta",
+                    value=cand["source_label"],
+                    disabled=True,
+                    key=f"suggested_source_{code_text}",
+                )
+
+            with c2:
+                st.text_input(
+                    "Esimerkkihuomio",
+                    value=cand["example_note"] or "",
+                    disabled=True,
+                    key=f"example_note_{code_text}",
+                )
+                st.text_input(
+                    "Huomioita yhteensä",
+                    value=str(cand["note_count"]),
+                    disabled=True,
+                    key=f"note_count_{code_text}",
+                )
+
+            default_category = cand["suggested_category"] if cand["suggested_category"] in category_options else "Tuntematon"
+            selected_category = st.selectbox(
+                "Valitse aikalaji",
+                options=category_options,
+                index=category_options.index(default_category),
+                key=f"category_override_{code_text}",
+            )
+            confirmed_name = st.text_input(
+                "Vahvistettu nimi",
+                value=cand["suggested_name"] or cand["example_note"] or f"Yhdistelmäkoodi {code_text}",
+                key=f"name_override_{code_text}",
+            )
+
+            overrides[cand["code_key"]] = {
+                "name": confirmed_name.strip(),
+                "category": selected_category,
+                "synthetic": True,
+                "source": "user_confirmed",
+            }
+            st.divider()
+
+        submitted = st.form_submit_button("Hyväksy yhdistelmäkoodit ja muodosta kuvaajat", use_container_width=True)
+
+    return submitted, overrides
+
 def render_person_sections(person_day_infos: dict, batch_catalog: dict, ui_mode: str = "streamlit"):
     if not person_day_infos:
         if ui_mode == "streamlit":
@@ -1233,7 +1355,14 @@ def run_streamlit():
     if not file_datasets:
         st.stop()
 
-    person_day_infos, batch_catalog = build_person_day_infos(file_datasets)
+    _, candidates, _ = collect_combined_code_candidates(file_datasets)
+    approved, overrides = render_combined_code_confirmation(candidates)
+
+    if not approved:
+        st.info("Vahvista yhdistelmäkoodit yllä, niin kuvaajat ja tilastot muodostetaan valinnoillasi.")
+        st.stop()
+
+    person_day_infos, batch_catalog = build_person_day_infos(file_datasets, catalog_overrides=overrides)
     render_person_sections(person_day_infos, batch_catalog, ui_mode="streamlit")
 
 
@@ -1273,7 +1402,7 @@ def run_local():
     if not file_datasets:
         sys.exit(1)
 
-    person_day_infos, batch_catalog = build_person_day_infos(file_datasets)
+    person_day_infos, batch_catalog = build_person_day_infos(file_datasets, catalog_overrides=None)
     render_person_sections(person_day_infos, batch_catalog, ui_mode="local")
     plt.show()
 
