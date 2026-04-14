@@ -269,18 +269,53 @@ def make_chart1(day_info: list):
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(tick_labels, rotation=45, ha="right", fontsize=8)
 
-    # Päivämääräotsikot x-akselin yläpuolelle
+    # Katkoviiva + päivämääräteksti jokaisen päivän aloituskohdassa
     for day in day_info:
-        label = day["date"].strftime("%-d.%-m.%Y") if day["date"] else "?"
-        ax.text(day["x_mid"], 1.25, label,
-                ha="center", va="bottom", fontsize=10,
-                fontweight="bold", color="#333333")
+        date_label = day["date"].strftime("%-d.%-m.%Y") if day["date"] else "?"
+        x_start = day["x_start"]
 
-    # Vertikaalinen erotinviiva päivien väliin
+        # Katkoviiva päivän alkuun
+        ax.axvline(x_start, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
+
+        # Päivämääräteksti 90° käännetty, katkoviivan vieressä
+        ax.text(
+            x_start + 1.0,   # hieman viivan oikealle puolelle
+            -1.45,            # lähellä pohjaa, teksti nousee ylöspäin
+            date_label,
+            rotation=90,
+            rotation_mode="anchor",
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color="#444444",
+            zorder=5,
+        )
+
+    # Katkoviiva + päivämääräteksti päivien välissä (päivän vaihdon kohta)
     if len(day_info) > 1:
         for i in range(len(day_info) - 1):
             gap_x = (day_info[i]["x_end"] + day_info[i + 1]["x_start"]) / 2
-            ax.axvline(gap_x, color="#BDBDBD", linestyle="--", linewidth=1.2, zorder=1)
+            next_date = day_info[i + 1]["date"]
+            date_label = next_date.strftime("%-d.%-m.%Y") if next_date else "?"
+
+            # Katkoviiva päivien väliin
+            ax.axvline(gap_x, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
+
+            # Päivämääräteksti 90° käännetty viivan vieressä
+            ax.text(
+                gap_x + 1.0,
+                -1.45,
+                date_label,
+                rotation=90,
+                rotation_mode="anchor",
+                ha="left",
+                va="bottom",
+                fontsize=9,
+                fontweight="bold",
+                color="#444444",
+                zorder=5,
+            )
 
     ax.axhline(0, color="#333333", linewidth=1.2, zorder=3)
     ax.set_ylim(-1.6, 2.0)
