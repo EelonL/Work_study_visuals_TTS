@@ -292,30 +292,11 @@ def make_chart1(day_info: list):
             zorder=5,
         )
 
-    # Katkoviiva + päivämääräteksti päivien välissä (päivän vaihdon kohta)
+    # Pelkkä katkoviiva päivien väliin (ilman tekstiä – päivämäärä näkyy jo seuraavan päivän aloitusviivassa)
     if len(day_info) > 1:
         for i in range(len(day_info) - 1):
             gap_x = (day_info[i]["x_end"] + day_info[i + 1]["x_start"]) / 2
-            next_date = day_info[i + 1]["date"]
-            date_label = next_date.strftime("%-d.%-m.%Y") if next_date else "?"
-
-            # Katkoviiva päivien väliin
-            ax.axvline(gap_x, color="#888888", linestyle="--", linewidth=1.2, zorder=4)
-
-            # Päivämääräteksti 90° käännetty viivan vieressä
-            ax.text(
-                gap_x + 1.0,
-                -1.45,
-                date_label,
-                rotation=90,
-                rotation_mode="anchor",
-                ha="left",
-                va="bottom",
-                fontsize=9,
-                fontweight="bold",
-                color="#444444",
-                zorder=5,
-            )
+            ax.axvline(gap_x, color="#BBBBBB", linestyle="--", linewidth=1.0, zorder=2)
 
     ax.axhline(0, color="#333333", linewidth=1.2, zorder=3)
     ax.set_ylim(-1.6, 2.0)
@@ -397,9 +378,9 @@ def make_chart2(day_info: list):
         ax.spines["bottom"].set_color("#CCCCCC")
         ax.grid(axis="x", color="#E0E0E0", linestyle="-", linewidth=0.5)
 
-        ax.text(0.98, 0.02,
-                f"n = {total} havaintoa\n≈ {total} min",
-                transform=ax.transAxes, ha="right", va="bottom",
+        ax.text(0.02, 0.98,
+                f"n = {total} havaintoa  /  ≈ {total} min",
+                transform=ax.transAxes, ha="left", va="top",
                 fontsize=8, color="#777777")
 
     plt.tight_layout()
