@@ -720,7 +720,19 @@ def get_xticks_for_day_info(day_info: list):
 
 
 def sort_code_key(code):
+    """
+    Turvallinen lajitteluavain koodeille.
+
+    Palauttaa aina samanmuotoisen tuplen, jotta Python ei joudu
+    vertailemaan float- ja str-arvoja keskenään.
+    """
+    code_str = str(code).strip()
     try:
+        numeric = float(code_str.replace(",", "."))
+        return (0, numeric, code_str)
+    except Exception:
+        return (1, code_str.lower(), code_str)
+
         return float(str(code).replace(",", "."))
     except Exception:
         return str(code)
