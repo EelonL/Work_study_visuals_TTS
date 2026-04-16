@@ -97,6 +97,30 @@ def classify_code(code) -> str:
     return "Tuntematon"
 
 
+def normalize_category_label(value) -> str:
+    """
+    Yhtenäistää Eräluettelo-välilehden aikalajinimet kuvaajien käyttämiin nimiin.
+    Esim. 'Häiriö' -> 'Häiriöaika' ja 'Valmius' -> 'Valmiusaika'.
+    """
+    raw = str(value or "").strip()
+    key = raw.lower().replace("ä", "a").replace("ö", "o")
+
+    mapping = {
+        "tekemisaika": "Tekemisaika",
+        "apuaika": "Apuaika",
+        "hairio": "Häiriöaika",
+        "hairioaika": "Häiriöaika",
+        "muu": "Muu",
+        "muu aika": "Muu",
+        "valmius": "Valmiusaika",
+        "valmiusaika": "Valmiusaika",
+        "tauko": "Taukoaika",
+        "taukoaika": "Taukoaika",
+        "tuntematon": "Tuntematon",
+    }
+    return mapping.get(key, raw if raw else "Tuntematon")
+
+
 STOPWORDS_FI = {
     "ja", "tai", "sekä", "myös", "samalla", "kanssa", "että", "oli", "lopulta",
     "käyttää", "käyttääkö", "käytti", "katsoo", "katsoo", "lukee", "puhuu",
@@ -146,7 +170,7 @@ def build_catalog_match_index(batch_catalog: dict) -> dict:
             "tokens": tokens,
             "roots": token_roots(tokens),
             "name_norm": normalize_text(name),
-            "category": str(info.get("category", "")).strip(),
+            "category": normalize_category_label(info.get("category", "")),
             "name": name,
         }
     return index
@@ -269,7 +293,7 @@ def infer_combined_code_info(code_key, notes: list, batch_catalog: dict, catalog
             name = str(info.get("name", "")).strip()
             if name:
                 names.append(name)
-            cat = str(info.get("category", "")).strip()
+            cat = normalize_category_label(info.get("category", ""))
             if cat:
                 categories.append(cat)
 
@@ -316,7 +340,7 @@ def infer_combined_code_info(code_key, notes: list, batch_catalog: dict, catalog
                 nm = str(info.get("name", "")).strip()
                 if nm:
                     names.append(nm)
-                cat = str(info.get("category", "")).strip()
+                cat = normalize_category_label(info.get("category", ""))
                 if cat:
                     categories.append(cat)
 
@@ -410,7 +434,7 @@ def read_batch_catalog(wb) -> dict:
 
         batch_catalog[code_key] = {
             "name": name_str,
-            "category": str(cat).strip() if cat is not None else "",
+            "category": normalize_category_label(cat),
         }
 
     return batch_catalog
@@ -645,7 +669,7 @@ def build_person_day_infos(file_datasets: list, catalog_overrides: dict | None =
             for obs in observations:
                 code_key = obs["code_key"]
                 info = effective_catalog.get(code_key, {})
-                resolved_category = str(info.get("category", "")).strip() or obs.get("category", "Tuntematon")
+                resolved_category = normalize_category_label(info.get("category", "")) or obs.get("category", "Tuntematon")
                 resolved_obs.append({
                     **obs,
                     "category": resolved_category,
@@ -726,7 +750,7 @@ def build_chart3_legend_df(day_info: list, batch_catalog: dict) -> pd.DataFrame:
         rows.append({
             "Koodi": str(code_key).replace(".0", ""),
             "Selite": str(info.get("name", "")).strip() or format_batch_label(code_key, batch_catalog),
-            "Ryhmä": str(info.get("category", "")).strip() or "Työnerä",
+            "Ryhmä": normalize_category_label(info.get("category", "")) or "Työnerä",
         })
 
     rows.extend([
